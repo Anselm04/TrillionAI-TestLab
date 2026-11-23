@@ -1,5 +1,7 @@
 # TrillionAI TestLab
 
+**Product boundary: testing and factual evidence reporting only.** TestLab does not create, repair, edit, deliver, deploy or certify customer software. Customers return identified defects to their own builder, then resubmit a new revision for retesting. See [Tester-Only Contract](docs/TESTER_ONLY_CONTRACT.md).
+
 Independent, local-first software testing laboratory for TrillionAI products and, eventually, externally supplied applications.
 
 ## Current scope: Phase 1 prototype
@@ -64,7 +66,7 @@ The Flutter UI is an initial client only; it requires a reachable local API with
 1. Durable job queue, SQLite/PostgreSQL persistence, artifact retention, immutable commit imports, failure recovery.
 2. Strongly isolated workers and coverage contracts for Flutter, Node.js, Python, web apps and databases.
 3. Real browser/mobile/API E2E testing, security scans, permission isolation, payments sandbox, load and fault testing.
-4. Repeatable requirements-to-test traceability, signed attestations, fail-closed readiness gates.
-5. Pluggable language/application adapters (including games, desktop, mobile, SaaS, infrastructure and AI agents), with clear *unsupported/untested* results until certified.
+4. Repeatable requirements-to-test traceability and tamper-evident factual reports; no release approval or guarantees.
+5. Pluggable language/application adapters (including games, desktop, mobile, SaaS, infrastructure and AI agents), with clear *unsupported/untested* results until their test adapters are validated.
 
 Every adapter must report the exact environment, supported test capabilities, evidence and known omissions. **UNTESTED is never PASS.**
