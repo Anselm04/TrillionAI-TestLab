@@ -1,7 +1,8 @@
 import { realpath, mkdir, writeFile } from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { makeObservation, sealReport } from './evidence.js';
 
 export async function resolveProject(root, name) {
   if (typeof name !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/.test(name) || name === '.' || name === '..') throw new Error('Project must be a single directory name');
@@ -41,16 +42,18 @@ export async function executeRun({ workspaceRoot, reportRoot, project, runner = 
     '--workdir', '/workspace', image, 'node', '--test'
   ];
   const result = await runner('docker', args, { timeoutMs: 120000 });
-  const status = result.error ? 'INFRASTRUCTURE_ERROR' : result.timedOut ? 'TIMEOUT' : result.exitCode === 0 ? 'PASSED' : 'FAILED';
-  const report = {
+  const observation = makeObservation({ checkId: 'node-built-in-tests', command: 'node --test', runnerResult: result, environment: { image, network: 'none', readOnlyRoot: true } });
+  const status = observation.status;
+  const report = sealReport({
     schemaVersion: 1, id, project, profile: 'node-built-in-tests',
     startedAt: start, finishedAt: new Date().toISOString(), status,
     checks: [{ name: 'Node.js built-in test suite', status, exitCode: result.exitCode ?? null }],
     scope: 'Initial Node.js test runner only. NOT a production-readiness certificate.',
     execution: { image, network: 'disabled', readOnly: true, resourceLimits: true },
-    evidence: { output: result.output || '', error: result.error || null }
-  };
-  report.sha256 = createHash('sha256').update(JSON.stringify(report)).digest('hex');
+    evidence: { output: result.output || '', error: result.error || null },
+    observations: [observation],
+    productionReady: false
+  });
   await mkdir(reportRoot, { recursive: true });
   await writeFile(join(reportRoot, id + '.json'), JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o600 });
   return report;

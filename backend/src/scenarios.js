@@ -29,7 +29,8 @@ export function createCoveragePlan(requirements = []) {
       status: 'UNTESTED',
       evidence: [],
     })),
-    productionReady: false,
+    productionReady: false, // Legacy compatibility: TestLab does not certify software.
+    allDeclaredChecksEvidenced: false,
   };
 }
 
@@ -41,7 +42,8 @@ export function computeReadiness(plan) {
   // A category cannot be marked not applicable without independently supplied evidence.
   const unevidenced = checks.filter(x => ['PASSED','NOT_APPLICABLE'].includes(x.status) && (!Array.isArray(x.evidence) || x.evidence.length === 0));
   return {
-    productionReady: failing.length === 0 && unknown.length === 0 && unevidenced.length === 0,
+    productionReady: false,
+    allDeclaredChecksEvidenced: checks.length > 0 && failing.length === 0 && unknown.length === 0 && unevidenced.length === 0,
     failing: failing.map(x => x.id),
     unverified: [...unknown, ...unevidenced].map(x => x.id),
   };
