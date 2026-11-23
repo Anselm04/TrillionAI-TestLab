@@ -11,7 +11,7 @@ The repository contains a real, limited Docker-based **Node.js test runner**, al
 3. **Isolated worker boundary**: disposable VM/microVM for untrusted code; Docker inside worker for disposable test services.
 4. **Agent terminal service**: PTY spawned *inside the guest*, never the host. Host control plane uses a narrow, authenticated command broker.
 5. **Pluggable verification adapters**: detect technology, list supported capabilities, execute actual tests, provide verifiable artifacts.
-6. **Independent release assessor**: fail closed for missing coverage, unsupported environments, or failed security checks.
+6. **Independent evidence evaluator**: report passed, failed, missing and unsupported checks accurately; never certify production readiness.
 
 ## Important design choices
 
@@ -19,7 +19,7 @@ The repository contains a real, limited Docker-based **Node.js test runner**, al
 - Block outbound network by default; dependency installation needs a controlled, auditable mirror or approved egress.
 - Per-session CPU, memory, file system, process, command, network and spending budgets are enforceable by infrastructure, not AI instructions.
 - Every agent command records intent, command arguments, stdout/stderr, timestamps, exit code and source revision. Secrets are redacted before retention.
-- Any code changes remain inside an ephemeral workspace until separately approved and reviewed.
+- Test scripts and fixtures may be generated in an independent ephemeral workspace; submitted customer source must never be edited, repaired or rebuilt into a new customer product.
 - TestLab cannot certify its own test results based exclusively on agent statements.
 - The current sandbox-policy module limits Phase 1 operations to the existing node-test adapter. **It is a policy scaffold, not a kernel sandbox.**
 - In a later phase, use guest-isolated PTY sessions and automated teardown. Do not give an LLM an unrestricted host shell.
@@ -32,7 +32,7 @@ The repository contains a real, limited Docker-based **Node.js test runner**, al
 - `POST /v1/jobs/:id/cancel`: cancel and destroy guest resources.
 - Agent action: `run_tool(session_id, tool_id, typed_args)` with independent policy enforcement.
 
-The AppForge repair agent may consume evidence and submit a **new revision**. Manager may coordinate jobs but cannot override test verdicts.
+The customer or an independently operated builder (including AppForge, if later integrated) may consume TestLab's findings and submit a **new revision** for retesting. TestLab itself never edits or repairs customer source. Manager may coordinate test submissions but cannot override recorded observations.
 
 ## Next execution milestone
 
