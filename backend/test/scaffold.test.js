@@ -45,5 +45,6 @@ test('readiness needs evidence on every declared requirement and applicable cate
     categories:plan.categories.map(c=>({...c,status:'NOT_APPLICABLE',evidence:['reviewed applicability']})),
     requirements:plan.requirements.map(r=>({...r,status:'PASSED',evidence:['run-123']})),
   });
-  assert.equal(result.productionReady,true);
+  assert.equal(result.productionReady,false);
+  assert.equal(result.allDeclaredChecksEvidenced,true);
 });
