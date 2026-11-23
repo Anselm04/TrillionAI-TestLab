@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, symlink, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveProject, executeRun } from '../src/core.js';
+import { verifyReportChecksum } from '../src/evidence.js';
 
 test('reject traversal and invalid names', async () => {
   const root = await mkdtemp(join(tmpdir(), 'testlab-root-'));
@@ -29,6 +30,9 @@ test('test runs save evidence of real runner return code', async () => {
     return {exitCode:1,output:'FAIL sample test',timedOut:false};
   }});
   assert.equal(report.status,'FAILED');
+  assert.equal(report.observations[0].status,'FAILED');
+  assert.equal(report.productionReady,false);
+  assert.equal(verifyReportChecksum(report),true);
   assert.equal(JSON.parse(await readFile(join(reports,report.id+'.json'))).status,'FAILED');
 });
 
