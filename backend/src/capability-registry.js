@@ -81,6 +81,7 @@ export function summarizeExecutedChecks(plan, observations) {
   const ids = new Set();
   for (const observation of observations) {
     if (!observation || !allowed.has(observation.status) || typeof observation.checkId !== 'string') throw new Error('Invalid observation');
+    if (!plan.checks.some(check=>check.checkId === observation.checkId)) throw new Error('Observation is not in the declared plan');
     if (ids.has(observation.checkId)) throw new Error('Duplicate observation');
     ids.add(observation.checkId);
   }
