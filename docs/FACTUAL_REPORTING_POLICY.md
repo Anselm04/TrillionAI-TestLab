@@ -26,4 +26,4 @@ A checksum detects changes to a report given the original trusted checksum. A st
 The current Phase 1 runner captures terminal output into local JSON reports. Do not feed it production secrets, personal records, or untrusted third-party projects. Sanitization and separate secure evidence retention are prerequisites to supporting real customers.
 
 ## Release boundary
-TestLab does not guarantee functionality, approve production deployments, or modify customer code automatically. It reports only what it actually observes. A future optional engineering integration may propose fixes under customer authorization.
+TestLab does not guarantee functionality, approve production deployments, modify customer code, or perform software repairs. TestLab is strictly a tester. It reports only what it actually observes. The customer or their chosen independent builder performs fixes externally and supplies a new revision for a separate retest. See TESTER_ONLY_CONTRACT.md.
