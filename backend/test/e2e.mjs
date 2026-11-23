@@ -29,7 +29,7 @@ try {
   assert.equal(response.status,200);
   const report = await response.json();
   assert.equal(report.status,'PASSED',JSON.stringify(report));
-  assert.equal(JSON.parse(await readFile(join(reports,report.id+'.json'),'utf8')).sha256,report.sha256);
+  assert.equal(JSON.parse(await readFile(join(reports,report.id+'.json'),'utf8')).integrity.digest,report.integrity.digest);
   const retrieved = await fetch('http://127.0.0.1:'+port+'/runs/'+report.id,{headers:{Authorization:'Bearer '+token}});
   assert.equal(retrieved.status,200);
   assert.equal((await retrieved.json()).id,report.id);
