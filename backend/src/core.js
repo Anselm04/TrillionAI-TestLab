@@ -54,8 +54,6 @@ export async function executeRun({ workspaceRoot, reportRoot, project, runner = 
     observations: [observation],
     productionReady: false
   });
-  // Compatibility field used by the initial E2E test; content checksum is not a signature.
-  report.sha256 = report.integrity.digest;
   await mkdir(reportRoot, { recursive: true });
   await writeFile(join(reportRoot, id + '.json'), JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o600 });
   return report;
