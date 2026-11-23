@@ -1,0 +1,12 @@
+name: trillionai_testlab
+description: TrillionAI TestLab local testing dashboard
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.3.0
+flutter:
+  uses-material-design: true
