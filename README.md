@@ -4,6 +4,10 @@
 
 Independent, local-first software testing laboratory for TrillionAI products and, eventually, externally supplied applications.
 
+## Locked core architecture — Hierarchical Map-Reduce Analysis
+
+[HCIE authoritative architecture](docs/LOCKED_HCIE_ARCHITECTURE.md) is the foundational large-repository analysis design. TestLab must inventory every submitted file, partition source into bounded units, consolidate assessments through a multi-level evidence hierarchy, and preserve reverse traceability to the original files and actual test runs. The initial in-memory evidence aggregation and regression tests are implemented; streaming ingestion, persistent checkpointing and hundred-million-line validation are future engineering milestones. No claim of unlimited capacity or unexecuted coverage is permitted.
+
 ## Current scope: Phase 1 prototype
 
 The initial implementation runs Node.js built-in tests against a **trusted, local** project directory inside a restricted Docker container; records JSON evidence; exposes an authenticated local API; and includes a basic Flutter client.
