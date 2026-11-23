@@ -34,4 +34,5 @@ test('invalid result and invented successful observation are rejected', () => {
   assert.throws(()=>summarizeExecutedChecks(plan,[{checkId:'node.builtin-test',status:'FAILED',exitCode:0}]),/Evidence mismatch/);
   assert.throws(()=>summarizeExecutedChecks(plan,[{checkId:'node.builtin-test',status:'IMAGINED',exitCode:0}]),/Invalid/);
   assert.throws(()=>planRequestedChecks(['security','security']),/Duplicate/);
+  assert.throws(()=>summarizeExecutedChecks(plan,[{checkId:'fictional.check',status:'PASSED',exitCode:0}]),/not in the declared plan/);
 });
