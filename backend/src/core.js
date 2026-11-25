@@ -13,15 +13,17 @@ export async function resolveProject(root, name) {
   return projectPath;
 }
 
-export function runProcess(binary, args, { timeoutMs = 120000, outputLimit = 128000 } = {}) {
+export function runProcess(binary, args, { timeoutMs = 120000, outputLimit = 128000, binaryOutput = false } = {}) {
   return new Promise((done) => {
     let output = '', finished = false, timedOut = false, outputTruncated = false;
     const child = spawn(binary, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    let binarySize=0; const chunks=[];
+    const collectBinary=chunk=>{if(chunk.length>outputLimit-binarySize)outputTruncated=true;const part=chunk.subarray(0,Math.max(0,outputLimit-binarySize));chunks.push(part);binarySize+=part.length;};
     const collect = chunk => { const text=chunk.toString(); if(text.length>outputLimit-output.length)outputTruncated=true; if (output.length < outputLimit) output += text.slice(0, outputLimit - output.length); };
-    child.stdout.on('data', collect);
+    child.stdout.on('data', binaryOutput ? collectBinary : collect);
     child.stderr.on('data', collect);
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    const complete = (result) => { if (!finished) { finished = true; clearTimeout(timer); done({ ...result, output: output.slice(0, outputLimit), timedOut, outputTruncated }); } };
+    const complete = (result) => { if (!finished) { finished = true; clearTimeout(timer); done({ ...result, output: output.slice(0, outputLimit), timedOut, outputTruncated, ...(binaryOutput?{stdoutBytes:Buffer.concat(chunks,binarySize)}:{}) }); } };
     child.on('error', err => complete({ exitCode: null, error: err.message }));
     child.on('close', code => complete({ exitCode: code }));
   });

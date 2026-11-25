@@ -23,6 +23,7 @@ function fake(){
   if(binary==='aapt2')return success("package: name='com.test.app' versionCode='1'\n");
   assert.equal(binary,'adb');assert.deepEqual(args.slice(0,2),['-s','device-1']);
   const cmd=args.slice(2).join(' ');
+  if(cmd==='exec-out screencap -p')return {...success(''),stdoutBytes:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP1sAAAAASUVORK5CYII=','base64')};
   if(cmd==='get-state')return success('device\n');
   if(cmd==='shell pm list packages com.test.app')return success(present?'package:com.test.app\n':'');
   if(cmd.startsWith('install ')){present=true;return success('Success\n');}
@@ -103,4 +104,5 @@ test('leased journey stores and verifies execution evidence',async t=>{
  assert.equal(report.status,'SMOKE_OBSERVED');
  assert.equal(report.journeyReport.evidenceStatus,'CHECKSUM_VERIFIED');
  assert.equal(await evidenceStore.verify(report.journeyReport.evidenceManifest),true);
+ assert.deepEqual(report.journeyReport.evidenceManifest.artifacts.map(x=>x.kind),['log','screenshot']);
 });
