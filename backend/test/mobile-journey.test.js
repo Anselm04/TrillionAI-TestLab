@@ -6,7 +6,7 @@ test('compile fixed action schema and escape selector regex',()=>{
  const flow=compileMaestro(journey);
  const [header,commands]=flow.split('\n---\n').map(JSON.parse);
  assert.equal(header.appId,'com.test.app');
- assert.deepEqual(commands,['launchApp',{tapText:{text:'^Sign in \\(test\\)$'}},{assertVisible:{text:'^Welcome$'}},'stopApp']);
+ assert.deepEqual(commands,['launchApp',{tapOn:{text:'^Sign in \\(test\\)$'}},{assertVisible:{text:'^Welcome$'}},'stopApp']);
 });
 test('reject arbitrary commands, interpolation and journeys without assertions',()=>{
  for(const step of [{action:'runScript',text:'x'},{action:'tapText',text:'${SECRET}'},{action:'assertVisible',text:'\n'}]){
