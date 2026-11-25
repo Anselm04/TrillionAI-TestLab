@@ -1,0 +1,33 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {generateKeyPairSync} from 'node:crypto';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {MobileEvidenceStore} from '../src/mobile-evidence.js';
+import {DurableDeviceLeases} from '../src/durable-device-leases.js';
+import {LeasedIosSupervisor} from '../src/leased-ios-supervisor.js';
+import {ReviewChallengeStore,createReplayProtectedReviewer} from '../src/review-challenges.js';
+import {createIosReviewOrchestrator} from '../src/ios-review-orchestrator.js';
+test('iOS lease, challenge propagation, actual evidence storage and independent signature integrate',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'ios-review-')),leases=new DurableDeviceLeases(join(dir,'leases.db')),challenges=new ReviewChallengeStore(join(dir,'challenges.db'));
+ t.after(async()=>{leases.close();challenges.close();await rm(dir,{recursive:true,force:true});});
+ const store=new MobileEvidenceStore(join(dir,'evidence')),worker=generateKeyPairSync('ed25519'),reviewer=generateKeyPairSync('ed25519');
+ const artifactSha256='a'.repeat(64),testRunSha256='b'.repeat(64),deviceId='iphone-1';
+ const challenge=challenges.issue({deviceId:'ios:'+deviceId,buildSha256:artifactSha256,flowSha256:testRunSha256});
+ const png=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).copy(png);png.writeUInt32BE(13,8);png.write('IHDR',12);png.writeUInt32BE(1,16);png.writeUInt32BE(1,20);
+ let installed=false;
+ const adapter={verifyArtifact:async()=>true,isInstalled:async()=>installed,install:async()=>{installed=true;return true;},uninstall:async()=>{installed=false;return true;},execute:async c=>{
+  assert.equal(c.reviewChallengeId,challenge.challengeId);
+  const evidenceManifest=await store.capture({deviceId:'ios:'+c.deviceId,buildSha256:c.artifactSha256,flowSha256:testRunSha256,reviewChallengeId:c.reviewChallengeId,log:'synthetic fixture',screenshot:png});
+  return {status:'COMMAND_SUCCEEDED',deviceId:c.deviceId,artifactSha256:c.artifactSha256,testRunSha256,evidenceStatus:'CHECKSUM_VERIFIED',evidenceManifest};
+ }};
+ const supervisor=new LeasedIosSupervisor({leases,approvedDevices:[deviceId],adapter,hostPlatform:'darwin'});
+ const review=createReplayProtectedReviewer({challenges,store,workerPublicKey:worker.publicKey,reviewerPrivateKey:reviewer.privateKey});
+ const run=createIosReviewOrchestrator({supervisor,store,workerPrivateKey:worker.privateKey,reviewerPublicKey:reviewer.publicKey,review,testRunSha256});
+ const input={deviceId,bundleId:'com.test.app',artifactPath:'/fixtures/Test.app',artifactSha256,isolationConfirmed:true,reviewChallengeId:challenge.challengeId};
+ const result=await run(input);
+ assert.equal(result.status,'EVIDENCE_REVIEWED');assert.equal(result.deploymentAuthorized,false);assert.equal(installed,false);
+ assert.equal((await run(input)).status,'BLOCKED');
+ assert.equal((await run({...input,reviewChallengeId:undefined})).status,'BLOCKED');
+});
