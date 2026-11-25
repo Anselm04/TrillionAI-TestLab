@@ -1,0 +1,25 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {MobileJobs} from '../src/mobile-jobs.js';
+import {RackCoordinator} from '../src/rack-coordinator.js';
+import {createRackTransport,createRackClient} from '../src/rack-transport.js';
+import {runMobileWorkerOnce} from '../src/mobile-worker-loop.js';
+test('authenticated worker polls queued profile and completes reviewed fixture',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'worker-api-'));
+ const jobs=new MobileJobs(join(dir,'jobs.db'),{profiles:[{id:'smoke',platform:'ios'}]});
+ const rack=new RackCoordinator(join(dir,'rack.db'));
+ const host={host:'mac',token:'a'.repeat(64),devices:[{id:'phone',platform:'ios'}]};
+ const transport=createRackTransport({jobs,rack,hosts:[host]});
+ t.after(async()=>{await new Promise(r=>transport.server.close(r));jobs.close();rack.close();await rm(dir,{recursive:true,force:true});});
+ const {port}=await transport.listen(),client=createRackClient({port,...host});
+ const submitted=jobs.submit('smoke');
+ await assert.rejects(client.poll('android'));
+ const discover=async()=>[{...host.devices[0],ready:true}];
+ const execute=async c=>{assert.equal(c.deviceId,'phone');assert.equal(c.profileId,'smoke');return {status:'EVIDENCE_REVIEWED',report:{cleanupVerified:true,leaseReleased:true}};};
+ assert.equal((await runMobileWorkerOnce({client,platform:'ios',discover,execute})).status,'EVIDENCE_REVIEWED');
+ assert.equal(jobs.get(submitted.jobId).state,'REVIEWED');
+ assert.equal((await runMobileWorkerOnce({client,platform:'ios',discover,execute})).status,'IDLE');
+});
