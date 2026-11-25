@@ -23,7 +23,7 @@ test('capacity refusal and unverified observations fail closed',async t=>{
 test('single execution and explicit interrupted-run fencing',async t=>{
  let release,started;const ready=new Promise(r=>{started=r;});
  const d=new DurableExecution(fixture(t),{profiles:[{...profile,execute:async c=>{started();await new Promise(r=>{release=r;});return {...c,status:'PASSED',evidenceId:'e1'};}}]});
- try{const r=submit(d);submit(d);const pending=d.runNext({checkCapacity:async()=>true});await ready;
+ try{const r=submit(d);submit(d);const pending=d.runNext({checkCapacity:async()=>true,expectedRunId:r.runId});await ready;
  assert.equal((await d.runNext({checkCapacity:async()=>true})).status,'IDLE_OR_BUSY');
  assert.equal(d.recoverInterrupted(),1);release();assert.equal((await pending).status,'STALE_EXECUTION');
  assert.equal(d.get(r.runId).state,'BLOCKED');}finally{d.close();}
