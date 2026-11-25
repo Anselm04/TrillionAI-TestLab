@@ -5,10 +5,10 @@ import { randomUUID } from 'node:crypto';
 // Trusted single-host supervisor. All workers must use the same protected database.
 // No customer-facing arbitrary command interface is exposed.
 export class LeasedAndroidSupervisor {
-  #leases; #approved; #runner; #evidenceStore;
-  constructor({leases,approvedDevices,runner=runProcess,evidenceStore}={}){
+  #leases; #approved; #runner; #evidenceStore; #appiumExecutor;
+  constructor({leases,approvedDevices,runner=runProcess,evidenceStore,appiumExecutor}={}){
     if(!leases||!Array.isArray(approvedDevices)||!approvedDevices.length||approvedDevices.some(id=>typeof id!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)))throw new Error('Lease store and explicit allowlist required');
-    this.#leases=leases;this.#approved=new Set(approvedDevices);this.#runner=runner;this.#evidenceStore=evidenceStore;
+    this.#leases=leases;this.#approved=new Set(approvedDevices);this.#runner=runner;this.#evidenceStore=evidenceStore;this.#appiumExecutor=appiumExecutor;
     for(const id of this.#approved)this.#leases.register(id);
   }
   async smoke(input){
@@ -25,7 +25,7 @@ export class LeasedAndroidSupervisor {
         if(!this.#leases.heartbeat({...lease,durationMs:300000}))throw new Error('Device lease lost during command');
         return result;
       };
-      const worker=new AndroidWorker({approvedDevices:[lease.deviceId],runner:guardedRunner,evidenceStore:this.#evidenceStore});
+      const worker=new AndroidWorker({approvedDevices:[lease.deviceId],runner:guardedRunner,evidenceStore:this.#evidenceStore,appiumExecutor:this.#appiumExecutor});
       report=await worker.smoke(input);
       // A failed or incomplete run is quarantined even if it never touched hardware.
       if(report.status==='SMOKE_OBSERVED'&&report.cleanupVerified===true){
