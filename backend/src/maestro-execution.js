@@ -21,7 +21,11 @@ export async function runMaestroJourney({journey,deviceId,packageName,buildSha25
  if(!evidenceStore)return report;
  if(!capturedLog)return {...report,evidenceStatus:'NOT_CAPTURED'};
  try{
-  const manifest=await evidenceStore.capture({deviceId,buildSha256,flowSha256:report.flowSha256,log:capturedLog});
+  // End-of-journey device screen, before APK uninstall; not an assertion-time screenshot.
+  const screen=await runner('adb',['-s',deviceId,'exec-out','screencap','-p'],{timeoutMs:15000,outputLimit:12*1024*1024,binaryOutput:true});
+  const screenshot=screen?.exitCode===0&&!screen.error&&!screen.timedOut&&!screen.outputTruncated&&Buffer.isBuffer(screen.stdoutBytes)?screen.stdoutBytes:undefined;
+  const manifest=await evidenceStore.capture({deviceId,buildSha256,flowSha256:report.flowSha256,log:capturedLog,screenshot});
+  if(!screenshot)return {...report,evidenceStatus:'CAPTURE_FAILED',evidenceManifest:manifest};
   return {...report,evidenceStatus:await evidenceStore.verify(manifest)?'CHECKSUM_VERIFIED':'INVALID',evidenceManifest:manifest};
  }catch{return {...report,evidenceStatus:'CAPTURE_FAILED'};}
 }
