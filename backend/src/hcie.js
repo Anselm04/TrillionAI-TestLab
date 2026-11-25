@@ -13,15 +13,16 @@ export function createInventory(entries, revision) {
   if (!validId(revision) || !Array.isArray(entries)) throw new TypeError('Revision and entries required');
   const seen = new Set();
   const files = entries.map(entry => {
+    const status = entry?.status ?? 'PENDING';
+    const unavailable = ['UNREADABLE','EXCLUDED','UNSUPPORTED'].includes(status);
     if (!entry || !validId(entry.path) || entry.path.startsWith('/') ||
         entry.path.split('/').some(p => p === '..' || p === '.') ||
-        typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(entry.sha256) ||
-        !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) {
+        (!(unavailable && entry.sha256 === null) && (typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(entry.sha256))) ||
+        (!(unavailable && entry.bytes === null) && (!Number.isSafeInteger(entry.bytes) || entry.bytes < 0))) {
       throw new TypeError('Invalid inventory entry');
     }
     if (seen.has(entry.path)) throw new Error('Duplicate path: ' + entry.path);
     seen.add(entry.path);
-    const status = entry.status ?? 'PENDING';
     if (!['PENDING','INDEXED','UNREADABLE','EXCLUDED','UNSUPPORTED'].includes(status)) throw new TypeError('Invalid inventory status');
     return Object.freeze({path:entry.path,sha256:entry.sha256,bytes:entry.bytes,status,reason:entry.reason ?? null});
   }).sort((a,b)=>a.path.localeCompare(b.path,'en'));
