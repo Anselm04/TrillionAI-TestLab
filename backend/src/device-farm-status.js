@@ -7,6 +7,6 @@ export async function inspectDeviceFarm({approvedDevices,leases,runner}){
  return {status:found.status,devices:[...approved].map(id=>{
   const device=detected.get(id);
   const leaseState=leases.status(id);
-  return {id,model:device?.model??null,hardwareKind:'unverified',connection:device?.state??'NOT_OBSERVED',leaseState,available:found.status==='DISCOVERED'&&device?.available===true&&leaseState==='IDLE'};
+  return {id,platform:'android',model:device?.model??null,hardwareKind:'unverified',connection:device?.state??'NOT_OBSERVED',leaseState,available:found.status==='DISCOVERED'&&device?.available===true&&leaseState==='IDLE'};
  }),productionReady:false};
 }
