@@ -13,12 +13,14 @@ async function fixture(t){
  let now=10000;
  const a=new DurableDeviceLeases(path,{clock:()=>now}),b=new DurableDeviceLeases(path,{clock:()=>now});
  t.after(async()=>{a.close();b.close();await rm(dir,{recursive:true,force:true});});
- return {a,b,advance:ms=>now+=ms,input:{deviceId:'device-1',packageName:'com.test.app',apkPath,apkSha256:createHash('sha256').update(bytes).digest('hex'),isolationConfirmed:true}};
+ return {a,b,advance:ms=>now+=ms,input:{deviceId:'device-1',packageName:'com.test.app',apkPath,apkSha256:createHash('sha256').update(bytes).digest('hex'),signerSha256:['a'.repeat(64)],isolationConfirmed:true}};
 }
 const success=output=>({exitCode:0,output,timedOut:false});
 function fake(){
  let present=false;
  return async(binary,args)=>{
+  if(binary==='apksigner')return success('Signer #1 certificate SHA-256 digest: '+'a'.repeat(64)+'\n');
+  if(binary==='aapt2')return success("package: name='com.test.app' versionCode='1'\n");
   assert.equal(binary,'adb');assert.deepEqual(args.slice(0,2),['-s','device-1']);
   const cmd=args.slice(2).join(' ');
   if(cmd==='get-state')return success('device\n');
