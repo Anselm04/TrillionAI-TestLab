@@ -1,0 +1,51 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {generateKeyPairSync} from 'node:crypto';
+import {mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {MobileEvidenceStore} from '../src/mobile-evidence.js';
+import {ReviewChallengeStore,createReplayProtectedReviewer} from '../src/review-challenges.js';
+import {createReviewerService,createReviewerClient} from '../src/reviewer-service.js';
+import {attestMobileRun} from '../src/signed-mobile-review.js';
+import {evaluateReleaseEvidence} from '../src/release-evidence-gate.js';
+import {RackCoordinator} from '../src/rack-coordinator.js';
+
+test('offline cross-platform rack, persistent evidence, HTTP review and release gate integration',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'testlab-integrated-'));
+ const root=join(dir,'evidence'),store=new MobileEvidenceStore(root);
+ const challenges=new ReviewChallengeStore(join(dir,'challenges.db'));
+ const rack=new RackCoordinator(join(dir,'rack.db'));
+ const worker=generateKeyPairSync('ed25519'),reviewer=generateKeyPairSync('ed25519');
+ const schedulerToken='a'.repeat(64),workerToken='b'.repeat(64);
+ const service=createReviewerService({challenges,schedulerToken,workerToken,review:createReplayProtectedReviewer({challenges,store,workerPublicKey:worker.publicKey,reviewerPrivateKey:reviewer.privateKey})});
+ t.after(async()=>{await new Promise(resolve=>service.server.close(resolve));challenges.close();rack.close();await rm(dir,{recursive:true,force:true});});
+ const {port}=await service.listen();
+ const issue=createReviewerClient({port,token:schedulerToken,role:'scheduler'});
+ const submit=createReviewerClient({port,token:workerToken,role:'worker'});
+ const png=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).copy(png);png.writeUInt32BE(13,8);png.write('IHDR',12);png.writeUInt32BE(1,16);png.writeUInt32BE(1,20);
+ const requirements=[],evidence=[];
+ for(const platform of ['android','ios']){
+  const host=platform+'-host',deviceId=platform+'-fixture',checkId=platform+'-smoke';
+  rack.heartbeatHost(host,[{id:deviceId,platform,ready:true}]);
+  const lease=rack.claim({host,platform,jobId:checkId});assert.ok(lease);
+  const context={deviceId,buildSha256:(platform==='ios'?'d':'c').repeat(64),flowSha256:'e'.repeat(64)};
+  const challenge=await issue(context);
+  const manifest=await store.capture({...context,reviewChallengeId:challenge.challengeId,log:'SYNTHETIC FIXTURE — no physical execution',screenshot:png});
+  const attestation=await attestMobileRun({report:{...context,evidenceManifest:manifest,status:'COMMAND_SUCCEEDED'},store,privateKey:worker.privateKey});
+  const submission={challengeId:challenge.challengeId,manifest,attestation};
+  const review=await submit(submission);
+  assert.equal(review.body.decision,'EVIDENCE_ACCEPTED');
+  await assert.rejects(submit(submission));
+  assert.equal(rack.finish({...lease,cleanupVerified:true}),true);
+  requirements.push({checkId,...context});evidence.push({checkId,manifest,attestation,review});
+ }
+ const config={requirements,evidence,reviewerPublicKey:reviewer.publicKey,store};
+ assert.equal((await evaluateReleaseEvidence(config)).status,'REQUIRED_EVIDENCE_VERIFIED');
+ assert.equal((await evaluateReleaseEvidence({...config,evidence:evidence.slice(0,1)})).status,'BLOCKED');
+ await writeFile(join(root,evidence[0].manifest.runId,'execution.log'),'tampered');
+ const result=await evaluateReleaseEvidence(config);
+ assert.equal(result.status,'BLOCKED');assert.equal(result.deploymentAuthorized,false);
+ assert.equal(result.productionReady,false);assert.equal(result.checks[0].status,'BLOCKED');
+ assert.equal(result.checks[1].status,'VERIFIED');
+});
