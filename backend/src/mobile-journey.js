@@ -36,18 +36,25 @@ export function compileMaestro(input){
  return JSON.stringify({appId:journey.packageName})+'\n---\n'+JSON.stringify(commands)+'\n';
 }
 
+// Domain-separated canonical execution plan for Appium; preserve existing Maestro digests.
+export function compileExecutionPlan(input,engine='maestro'){
+ if(engine==='maestro')return compileMaestro(input);
+ if(engine==='appium')return JSON.stringify({schemaVersion:1,engine:'appium',journey:validateJourney(input)});
+ throw new Error('Unsupported execution engine');
+}
+
 // The execution callback belongs to the trusted supervisor, not the customer.
 // Its observations must never be treated as independent or signed verification.
-export async function executeJourney({journey,deviceId,buildSha256,execute}){
+export async function executeJourney({journey,deviceId,buildSha256,execute,engine='maestro'}){
  const plan=validateJourney(journey);
  if(typeof deviceId!=='string'||!serial.test(deviceId)||typeof buildSha256!=='string'||!digest.test(buildSha256)||typeof execute!=='function')throw new Error('Invalid execution context');
- const flow=compileMaestro(plan);
+ const flow=compileExecutionPlan(plan,engine);
  let result;
  try{result=await execute({deviceId,packageName:plan.packageName,flow});}
- catch{return {journeyId:plan.id,deviceId,buildSha256,flowSha256:hash(flow),status:'INFRASTRUCTURE_ERROR',deploymentAuthorized:false};}
+ catch{return {journeyId:plan.id,deviceId,buildSha256,engine,flowSha256:hash(flow),status:'INFRASTRUCTURE_ERROR',deploymentAuthorized:false};}
  const output=typeof result?.output==='string'?result.output:'';
  let status='INFRASTRUCTURE_ERROR';
  if(result?.timedOut===true)status='TIMEOUT';
  else if(!result?.error&&!result?.outputTruncated&&Number.isInteger(result?.exitCode)&&result.exitCode>=0&&result.exitCode<=255&&typeof result?.output==='string'&&output.length>0)status=result.exitCode===0?'COMMAND_SUCCEEDED':'COMMAND_FAILED';
- return {journeyId:plan.id,deviceId,buildSha256,flowSha256:hash(flow),outputSha256:hash(output),status,exitCode:result?.exitCode??null,independentReview:'PENDING',deploymentAuthorized:false,productionReady:false};
+ return {journeyId:plan.id,deviceId,buildSha256,engine,flowSha256:hash(flow),outputSha256:hash(output),status,exitCode:result?.exitCode??null,independentReview:'PENDING',deploymentAuthorized:false,productionReady:false};
 }
