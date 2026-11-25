@@ -17,3 +17,12 @@ test('unsupported hosts and malformed inventory fail closed',async()=>{
  assert.throws(()=>parseIosInventory({result:{devices:[device,device]}}));
  assert.equal((await discoverIos({hostPlatform:'darwin',runner:async()=>({exitCode:1})})).status,'INFRASTRUCTURE_ERROR');
 });
+
+test('modern properties schema excludes simulators and preserves conservative readiness',()=>{
+ const hardware={platform:'iOS',udid:'00008101-ABCDEF',productType:'iPhone15,2',reality:'physical'};
+ const modern={properties:{hardware,connection:{pairingState:'paired'}}};
+ const simulator={properties:{hardware:{...hardware,udid:'SIM-123',reality:'simulated'}}};
+ const result=parseIosInventory({result:{devices:[modern,simulator]}});
+ assert.equal(result.length,1);assert.equal(result[0].id,hardware.udid);assert.equal(result[0].available,false);
+ assert.equal(result[0].kind,'unverified');
+});
