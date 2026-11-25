@@ -12,11 +12,11 @@ export class LeasedIosSupervisor{
   for(const id of this.#approved)leases.register('ios:'+id);
  }
  async smoke(input){
-  const {deviceId,bundleId,artifactPath,artifactSha256,isolationConfirmed}=input??{};
+  const {deviceId,bundleId,artifactPath,artifactSha256,isolationConfirmed,reviewChallengeId}=input??{};
   if(!this.#approved.has(deviceId)||isolationConfirmed!==true||typeof bundleId!=='string'||!bundle.test(bundleId)||typeof artifactPath!=='string'||!digest.test(artifactSha256??''))throw Error('Invalid iOS execution context');
   const lease=this.#leases.acquire({deviceId:'ios:'+deviceId,runId:randomUUID(),durationMs:300000});
   if(!lease)return {status:'BLOCKED',productionReady:false,deploymentAuthorized:false};
-  const context={deviceId,bundleId,artifactPath,artifactSha256};
+  const context={deviceId,bundleId,artifactPath,artifactSha256,reviewChallengeId};
   let touched=false,cleanupVerified=false,execution=null,released=false,failed=false;
   const call=async(method,args)=>{
    if(!this.#leases.heartbeat({...lease,durationMs:300000}))throw Error('Lease lost');
