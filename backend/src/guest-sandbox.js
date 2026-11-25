@@ -12,38 +12,54 @@ export function guestArguments({image,acceleration='kvm'}){
 }
 // Dedicated process group, bounded separate byte streams, wait for exit.
 // QEMU must run as an unprivileged dedicated account with no secrets.
-export function runGuestProcess(binary,args,{timeoutMs=120000,outputLimit=131072}={}){
+export function runGuestProcess(binary,args,{timeoutMs=120000,outputLimit=131072,signal}={}){
+ if(typeof binary!=='string'||!isAbsolute(binary)||!Array.isArray(args)||args.length>256||args.some(a=>typeof a!=='string'||a.includes('\0')||a.length>16384)||!Number.isSafeInteger(timeoutMs)||timeoutMs<10||timeoutMs>3600000||!Number.isSafeInteger(outputLimit)||outputLimit<1||outputLimit>1048576)throw Error('Invalid guest process configuration');
+ if(signal?.aborted)return Promise.resolve({exitCode:null,error:'CANCELLED',cleanupVerified:false,stdout:'',stderr:''});
  return new Promise(resolve=>{
   let child;
   try{child=spawn(binary,args,{shell:false,detached:true,stdio:['ignore','pipe','pipe'],env:{PATH:'/usr/bin:/bin',LANG:'C',HOME:'/nonexistent'}});}
   catch{return resolve({exitCode:null,error:'SPAWN_FAILED',cleanupVerified:false});}
-  const streams={stdout:[],stderr:[]},sizes={stdout:0,stderr:0};let timedOut=false,truncated=false,error=null;
-  const kill=()=>{if(child.pid){try{process.kill(-child.pid,'SIGKILL');}catch{}}};
+  const streams={stdout:[],stderr:[]},sizes={stdout:0,stderr:0};
+  let timedOut=false,truncated=false,error=null,done=false,watchdog,timer,stopping=false;
+  const kill=()=>{if(child.pid){try{process.kill(-child.pid,'SIGKILL');}catch(e){if(e.code!=='ESRCH')error='GROUP_TERMINATION_FAILED';}}};
+  const finish=(exitCode,exitSignal,cleanupVerified)=>{
+   if(done)return;done=true;clearTimeout(timer);clearTimeout(watchdog);signal?.removeEventListener('abort',cancel);
+   resolve({exitCode,signal:exitSignal,error,timedOut,truncated,cleanupVerified,stdout:Buffer.concat(streams.stdout).toString('utf8'),stderr:Buffer.concat(streams.stderr).toString('utf8')});
+  };
+  const stop=()=>{
+   if(done||stopping)return;stopping=true;kill();
+   watchdog=setTimeout(()=>{kill();child.stdout.destroy();child.stderr.destroy();child.unref();error='CLEANUP_UNCONFIRMED';finish(null,null,false);},5000);
+  };
+  const cancel=()=>{error='CANCELLED';stop();};
   for(const name of ['stdout','stderr'])child[name].on('data',chunk=>{
-   const room=Math.max(0,outputLimit-sizes[name]);if(chunk.length>room){truncated=true;kill();}
+   const room=Math.max(0,outputLimit-sizes[name]);
    if(room){const part=chunk.subarray(0,room);streams[name].push(part);sizes[name]+=part.length;}
+   if(chunk.length>room){truncated=true;stop();}
   });
-  const timer=setTimeout(()=>{timedOut=true;kill();},timeoutMs);
-  child.once('error',()=>{error='SPAWN_FAILED';});
-  child.once('close',(exitCode,signal)=>{
-   clearTimeout(timer);
+  child.once('error',()=>{error='SPAWN_FAILED';stop();});
+  child.once('exit',()=>{stop();});
+  child.once('close',(exitCode,exitSignal)=>{
    let cleanupVerified=false;
    if(child.pid){try{process.kill(-child.pid,0);kill();}catch(e){cleanupVerified=e.code==='ESRCH';}}
-   resolve({exitCode,signal,error,timedOut,truncated,cleanupVerified,stdout:Buffer.concat(streams.stdout).toString('utf8'),stderr:Buffer.concat(streams.stderr).toString('utf8')});
+   finish(exitCode,exitSignal,cleanupVerified);
   });
+  timer=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
+  signal?.addEventListener('abort',cancel,{once:true});
+  if(signal?.aborted)cancel();
  });
 }
-export async function bootIsolatedFixture({image,imageSha256,acceleration='kvm',runner=runGuestProcess}={}){
+export async function bootIsolatedFixture({image,imageSha256,acceleration='kvm',runner=runGuestProcess,signal,timeoutMs=120000}={}){
  const blocked=reason=>({status:'BLOCKED',reason,productionReady:false,deploymentAuthorized:false});
  try{
   if(process.platform!=='linux'||typeof process.getuid!=='function'||process.getuid()===0)return blocked('Unprivileged Linux worker required');
   if(typeof imageSha256!=='string'||!sha.test(imageSha256))return blocked('Pinned image digest required');
+  if(signal?.aborted)return blocked('Cancelled');
   const args=guestArguments({image,acceleration}),s=await lstat(image);
   if(!s.isFile()||s.size<1||s.size>2147483648||await realpath(image)!==image||(s.mode&0o222)!==0)return blocked('Protected immutable image required');
-  const hash=createHash('sha256');for await(const chunk of createReadStream(image))hash.update(chunk);
+  const hash=createHash('sha256');for await(const chunk of createReadStream(image)){if(signal?.aborted)return blocked('Cancelled');hash.update(chunk);}
   if(hash.digest('hex')!==imageSha256)return blocked('Image digest mismatch');
-  const result=await runner('/usr/bin/qemu-system-x86_64',args);
+  const result=await runner('/usr/bin/qemu-system-x86_64',args,{signal,timeoutMs});
   // Exit alone is not proof of test success or VM security qualification.
-  return {status:result.exitCode===0&&!result.error&&!result.timedOut&&!result.truncated&&result.cleanupVerified?'GUEST_EXIT_OBSERVED':'BLOCKED',imageSha256,result,productionReady:false,deploymentAuthorized:false};
+  return {status:!signal?.aborted&&result.exitCode===0&&!result.error&&!result.timedOut&&!result.truncated&&result.cleanupVerified?'GUEST_EXIT_OBSERVED':'BLOCKED',imageSha256,result,productionReady:false,deploymentAuthorized:false};
  }catch{return blocked('Guest infrastructure unavailable');}
 }
