@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { executeRun } from './core.js';
 import { DurableDeviceLeases } from './durable-device-leases.js';
+import { RackCoordinator } from './rack-coordinator.js';
 import { inspectDeviceFarm } from './device-farm-status.js';
 
 const host = process.env.TESTLAB_HOST || '127.0.0.1';
@@ -14,12 +15,14 @@ if (!token || token.length < 24) { console.error('Set TESTLAB_TOKEN to a random 
 const approvedDevices=(process.env.TESTLAB_DEVICE_ALLOWLIST||'').split(',').map(x=>x.trim()).filter(Boolean);
 const farmEnabled=approvedDevices.length>0&&!!process.env.TESTLAB_DEVICE_DB;
 const leases=farmEnabled?new DurableDeviceLeases(resolve(process.env.TESTLAB_DEVICE_DB)):null;
+const rack=process.env.TESTLAB_RACK_DB?new RackCoordinator(resolve(process.env.TESTLAB_RACK_DB)):null;
 let active = false;
 function send(res, code, data) { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); }
 const server = http.createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') return send(res, 200, { ok: true, service: 'TrillionAI-TestLab', version: '0.1.0' });
   if (req.headers.authorization !== 'Bearer ' + token) return send(res, 401, { error: 'Unauthorized' });
   if (req.url === '/device-farm' && req.method === 'GET') {
+    if(rack){try{return send(res,200,{status:'RACK_SNAPSHOT',devices:rack.inventory(),productionReady:false});}catch{return send(res,503,{status:'INFRASTRUCTURE_ERROR',devices:[],productionReady:false});}}
     if(!farmEnabled)return send(res,200,{status:'NOT_CONFIGURED',devices:[],productionReady:false});
     try{return send(res,200,await inspectDeviceFarm({approvedDevices,leases}));}
     catch{return send(res,503,{status:'INFRASTRUCTURE_ERROR',devices:[],productionReady:false});}
