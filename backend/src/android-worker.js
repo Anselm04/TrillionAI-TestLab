@@ -4,6 +4,7 @@ import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runProcess } from './core.js';
+import { verifyApkIdentity } from './apk-verification.js';
 
 const serialPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const packagePattern = /^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+$/;
@@ -28,7 +29,7 @@ export class AndroidWorker {
     if (this.#quarantined.has(id)) return 'QUARANTINED';
     return this.#active.has(id) ? 'BUSY' : 'IDLE';
   }
-  async smoke({ deviceId, packageName, apkPath, apkSha256, isolationConfirmed = false }) {
+  async smoke({ deviceId, packageName, apkPath, apkSha256, signerSha256, isolationConfirmed = false }) {
     if (this.status(deviceId)!=='IDLE') throw new Error('Device unavailable or not authorized');
     if (isolationConfirmed !== true) throw new Error('Dedicated isolated test host required');
     if (typeof packageName!=='string'||!packagePattern.test(packageName)||packageName.length>200 || typeof apkSha256!=='string'||!digestPattern.test(apkSha256)||typeof apkPath!=='string') throw new Error('Invalid artifact declaration');
@@ -60,6 +61,7 @@ export class AndroidWorker {
       dir=await mkdtemp(join(tmpdir(),'testlab-apk-'));
       const staged=join(dir,'artifact.apk');
       await writeFile(staged,bytes,{flag:'wx',mode:0o600});
+      await verifyApkIdentity({apkPath:staged,packageName,signerSha256,runner:this.#runner});
       const state=await execute('device-state',['get-state']);
       if(!ok(state)||state.output.trim()!=='device') throw new Error('Device not ready');
       // Refuse to replace an existing package or trust ambiguous package-list output.
