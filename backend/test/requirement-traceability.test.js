@@ -1,0 +1,36 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {createTraceabilityPlan,evaluateTraceability,createMobileTraceVerifier} from '../src/requirement-traceability.js';
+import {generateKeyPairSync,createHash} from 'node:crypto';
+import {attestMobileRun,reviewMobileRun} from '../src/signed-mobile-review.js';
+const revisionSha256='a'.repeat(64),definitionSha256='b'.repeat(64);
+const req=(id)=>({id,title:id});
+const check=(id,requirementIds)=>({id,requirementIds,definitionSha256,environmentId:'ubuntu'});
+const obs=(testId,status='PASSED')=>({testId,status,revisionSha256,definitionSha256,environmentId:'ubuntu',evidenceId:'run-'+testId});
+test('traceability preserves uncovered requirements, failures, partial and unverified coverage',async()=>{
+ const plan=createTraceabilityPlan({revisionSha256,requirements:['pass','fail','partial','untested','unverified'].map(req),tests:[check('one',['pass','partial']),check('two',['fail']),check('three',['partial']),check('four',['unverified'])]});
+ const report=await evaluateTraceability({plan,observations:[obs('one'),obs('two','FAILED'),{...obs('four'),revisionSha256:'c'.repeat(64)}],verifyObservation:async()=>true});
+ assert.deepEqual(report.counts,{PASSED:1,FAILED:1,PARTIALLY_TESTED:1,NOT_TESTED:1,UNVERIFIED:1});
+ assert.equal(report.productionReady,false);assert.equal(report.deploymentAuthorized,false);
+ assert.equal(report.tests.find(x=>x.testId==='four').reason,'CONTEXT_MISMATCH');
+ const denied=await evaluateTraceability({plan,observations:[obs('one')],verifyObservation:async()=>false});
+ assert.equal(denied.counts.PASSED,0);
+ await assert.rejects(evaluateTraceability({plan,observations:[obs('one'),obs('one')],verifyObservation:async()=>true}));
+ await assert.rejects(evaluateTraceability({plan:{...plan,revisionSha256:'c'.repeat(64)},observations:[],verifyObservation:async()=>true}));
+ assert.throws(()=>createTraceabilityPlan({revisionSha256,requirements:[req('r')],tests:[check('t',['unknown'])]}));
+});
+test('mobile traceability requires signed evidence and exact immutable test binding',async()=>{
+ const worker=generateKeyPairSync('ed25519'),reviewer=generateKeyPairSync('ed25519');
+ const manifest={runId:'mobile-run',deviceId:'phone',buildSha256:revisionSha256,flowSha256:definitionSha256,reviewChallengeId:'challenge-1',artifacts:[{kind:'log'},{kind:'screenshot'}]};
+ const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+ const store={verify:async m=>hash(m)===hash(manifest)};
+ const attestation=await attestMobileRun({report:{...manifest,status:'COMMAND_SUCCEEDED',evidenceManifest:manifest},store,privateKey:worker.privateKey});
+ const review=await reviewMobileRun({attestation,manifest,store,workerPublicKey:worker.publicKey,reviewerPrivateKey:reviewer.privateKey,expected:manifest});
+ const requirement={checkId:'mobile',deviceId:'phone',buildSha256:revisionSha256,flowSha256:definitionSha256,workerKeyId:attestation.body.workerKeyId,challengeId:'challenge-1'};
+ const plan=createTraceabilityPlan({revisionSha256,requirements:[req('r')],tests:[check('mobile',['r'])]});
+ const verifyObservation=createMobileTraceVerifier({bindings:[{testId:'mobile',revisionSha256,definitionSha256,environmentId:'ubuntu',requirement}],workerPublicKeys:[worker.publicKey],reviewerPublicKey:reviewer.publicKey,store});
+ const observation={...obs('mobile'),evidenceId:manifest.runId,evidence:{checkId:'mobile',manifest,attestation,review}};
+ assert.equal((await evaluateTraceability({plan,observations:[observation],verifyObservation})).counts.PASSED,1);
+ const forged=structuredClone(observation);forged.evidence.review.signature='invalid';
+ assert.equal((await evaluateTraceability({plan,observations:[forged],verifyObservation})).counts.UNVERIFIED,1);
+});
