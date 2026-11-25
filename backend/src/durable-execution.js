@@ -40,6 +40,13 @@ export class DurableExecution {
   const integrity=r.result===null?r.digest===null:hash(r.result)===r.digest;
   return {runId:r.id,profileId:r.profile,definitionSha256:r.definition,revisionSha256:r.revision,state:integrity?r.state:'BLOCKED',result:integrity&&r.result?JSON.parse(r.result):null,integrity,productionReady:false,deploymentAuthorized:false};
  }
+ // Bounded cursor scan. Use one journal per trusted project.
+ historyPage({after=0,limit=100}={}){
+  if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>500)throw Error('Invalid history page');
+  const rows=this.#db.prepare('SELECT rowid AS sequence,id FROM execution_runs WHERE rowid>? ORDER BY rowid LIMIT ?').all(after,limit+1);
+  const page=rows.slice(0,limit);
+  return {entries:page.map(r=>({sequence:r.sequence,...this.get(r.id)})),nextCursor:page.at(-1)?.sequence??after,hasMore:rows.length>limit};
+ }
  // Retests are permitted only for a reverified failed execution of a
  // currently registered, unchanged profile. No automatic replay of blocked runs.
  async scheduleRetest({parentRunId,verifyStoredObservation,maxAttempts=2,signal}={}){
