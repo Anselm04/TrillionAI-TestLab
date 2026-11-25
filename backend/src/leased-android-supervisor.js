@@ -18,7 +18,8 @@ export class LeasedAndroidSupervisor {
     let report, released=false;
     try{
       const guardedRunner=async(binary,args,options)=>{
-        if(!['apksigner','aapt2'].includes(binary)&&(binary!=='adb'||args[0]!=='-s'||args[1]!==lease.deviceId))throw new Error('Device command outside lease');
+        if(binary==='maestro'&&(args[0]!=='--device'||args[1]!==lease.deviceId||args[2]!=='test'))throw new Error('Maestro command outside lease');
+        if(!['apksigner','aapt2','maestro'].includes(binary)&&(binary!=='adb'||args[0]!=='-s'||args[1]!==lease.deviceId))throw new Error('Device command outside lease');
         if(!this.#leases.heartbeat({...lease,durationMs:300000}))throw new Error('Device lease lost');
         const result=await this.#runner(binary,args,options);
         if(!this.#leases.heartbeat({...lease,durationMs:300000}))throw new Error('Device lease lost during command');

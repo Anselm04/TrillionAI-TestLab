@@ -60,3 +60,33 @@ test('failed artifact verification is conservatively quarantined',async t=>{
  assert.equal(f.b.status('device-1'),'QUARANTINED');
  await assert.rejects(s.smoke({...f.input,deviceId:'unapproved'}));
 });
+
+test('Maestro executes after installation and before cleanup under lease',async t=>{
+ const f=await fixture(t),base=fake(),calls=[];
+ const s=new LeasedAndroidSupervisor({leases:f.a,approvedDevices:['device-1'],runner:async(binary,args)=>{
+  calls.push([binary,...args]);
+  if(binary==='maestro'){
+   assert.equal(f.b.status('device-1'),'LEASED');
+   assert.deepEqual(args.slice(0,3),['--device','device-1','test']);
+   return success('Journey completed');
+  }
+  return base(binary,args);
+ }});
+ const journey={id:'welcome',packageName:'com.test.app',steps:[{action:'launch'},{action:'assertVisible',text:'Welcome'},{action:'stop'}]};
+ const report=await s.smoke({...f.input,journey});
+ assert.equal(report.status,'SMOKE_OBSERVED');
+ assert.equal(report.journeyReport.status,'COMMAND_SUCCEEDED');
+ assert.equal(report.leaseReleased,true);
+ const index=calls.findIndex(x=>x[0]==='maestro');
+ assert.ok(index>calls.findIndex(x=>x[3]==='install'));
+ assert.ok(index<calls.findIndex(x=>x[3]==='uninstall'));
+});
+test('failed journey is cleaned up but remains blocked and quarantined',async t=>{
+ const f=await fixture(t),base=fake();
+ const s=new LeasedAndroidSupervisor({leases:f.a,approvedDevices:['device-1'],runner:async(binary,args)=>binary==='maestro'?{exitCode:1,output:'Assertion failed'}:base(binary,args)});
+ const journey={id:'welcome',packageName:'com.test.app',steps:[{action:'launch'},{action:'assertVisible',text:'Welcome'},{action:'stop'}]};
+ const report=await s.smoke({...f.input,journey});
+ assert.equal(report.status,'BLOCKED');assert.equal(report.cleanupVerified,true);
+ assert.equal(report.journeyReport.status,'COMMAND_FAILED');
+ assert.equal(f.b.status('device-1'),'QUARANTINED');
+});
