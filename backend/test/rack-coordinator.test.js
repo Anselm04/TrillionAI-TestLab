@@ -1,0 +1,34 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {RackCoordinator} from '../src/rack-coordinator.js';
+test('multi-host claims are exclusive, persistent and fail closed on heartbeat loss',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'rack-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+ let now=1000;const path=join(dir,'rack.db'),options={clock:()=>now};
+ const a=new RackCoordinator(path,options),b=new RackCoordinator(path,options);
+ t.after(()=>{a.close();b.close();});
+ a.heartbeatHost('mac-1',[{id:'iphone-1',platform:'ios',ready:true}]);
+ b.heartbeatHost('linux-1',[{id:'android-1',platform:'android',ready:true}]);
+ const lease=a.claim({host:'mac-1',platform:'ios',jobId:'job-1'});
+ assert.ok(lease);assert.equal(b.claim({host:'mac-1',platform:'ios',jobId:'job-2'}),null);
+ assert.equal(b.claim({host:'linux-1',platform:'android',jobId:'job-1'}),null);
+ assert.equal(b.finish({...lease,host:'linux-1',cleanupVerified:true}),false);
+ assert.throws(()=>b.heartbeatHost('linux-1',[{id:'iphone-1',platform:'ios',ready:true}]));
+ now+=31000;
+ assert.equal(a.inventory().find(x=>x.id==='iphone-1').state,'QUARANTINED');
+ assert.equal(a.finish({...lease,cleanupVerified:true}),false);
+ a.heartbeatHost('mac-1',[{id:'iphone-1',platform:'ios',ready:true}]);
+ assert.equal(b.claim({host:'mac-1',platform:'ios',jobId:'job-3'}),null);
+});
+test('verified completion releases device; missing inventory quarantines active work',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'rack-'));const a=new RackCoordinator(join(dir,'rack.db'));t.after(async()=>{a.close();await rm(dir,{recursive:true,force:true});});
+ const devices=[{id:'phone',platform:'android',ready:true}];
+ a.heartbeatHost('host',devices);
+ const l=a.claim({host:'host',platform:'android',jobId:'first'});
+ assert.equal(a.finish({...l,cleanupVerified:true}),true);
+ const next=a.claim({host:'host',platform:'android',jobId:'second'});
+ assert.ok(next.fence>l.fence);assert.equal(a.finish({...l,cleanupVerified:true}),false);
+ a.heartbeatHost('host',[]);assert.equal(a.inventory()[0].state,'QUARANTINED');
+});
