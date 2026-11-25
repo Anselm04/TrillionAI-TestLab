@@ -1,0 +1,3 @@
+# Signed mobile review
+
+The worker attests a verified evidence manifest and declared journey outcome using an Ed25519 key. A separate reviewer key signs an evidence decision after checking the expected run, build, device and flow, worker signature, and stored artifacts. An accepted evidence decision does not authorize release or establish that assertions actually executed. The caller must supply trusted public keys and expected run context; key management, process separation, replay tracking and independent assertion-level verification are not implemented here. Never expose private keys to customer workloads. Offline tests use ephemeral keys. No production deployment or hardware purchase is required.
