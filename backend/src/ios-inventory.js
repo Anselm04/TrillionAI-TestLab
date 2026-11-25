@@ -7,10 +7,12 @@ export function parseIosInventory(document){
  if(!Array.isArray(document?.result?.devices))throw Error('Unsupported device inventory schema');
  const found=new Map();
  for(const d of document.result.devices){
-  const h=d?.hardwareProperties;
+  const modern=d?.properties;
+  const h=modern?.hardware??d?.hardwareProperties;
   if(h?.platform!=='iOS'||typeof h.udid!=='string'||!idPattern.test(h.udid))continue;
+  if(h.reality==='simulated'||d.visibilityClass==='simulators')continue;
   if(found.has(h.udid))throw Error('Duplicate device');
-  const c=d.connectionProperties??{};
+  const c=modern?.connection??d.connectionProperties??{};
   found.set(h.udid,{id:h.udid,platform:'ios',model:typeof h.productType==='string'?h.productType:null,state:c.pairingState==='paired'?'paired':'unverified',kind:'unverified',available:false});
  }
  return [...found.values()];
