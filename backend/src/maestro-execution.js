@@ -2,13 +2,14 @@ import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {executeJourney,validateJourney} from './mobile-journey.js';
+import {collectDeviceDiagnostics} from './device-diagnostics.js';
 
 // Only called inside the trusted leased worker with a verified installed APK.
 export async function runMaestroJourney({journey,deviceId,packageName,buildSha256,runner,evidenceStore}){
  const plan=validateJourney(journey);
  if(plan.packageName!==packageName||typeof runner!=='function')throw new Error('Journey does not match verified APK');
  let capturedLog;
- const report=await executeJourney({journey:plan,deviceId,buildSha256,execute:async({flow})=>{
+ let report=await executeJourney({journey:plan,deviceId,buildSha256,execute:async({flow})=>{
   const dir=await mkdtemp(join(tmpdir(),'testlab-maestro-'));
   try{
    const path=join(dir,'flow.yaml');
@@ -18,6 +19,10 @@ export async function runMaestroJourney({journey,deviceId,packageName,buildSha25
    return result;
   }finally{await rm(dir,{recursive:true,force:true});}
  }});
+ if(evidenceStore){
+  const diagnostics=await collectDeviceDiagnostics({deviceId,packageName,runner});
+  report={...report,diagnostics};
+ }
  if(!evidenceStore)return report;
  if(!capturedLog)return {...report,evidenceStatus:'NOT_CAPTURED'};
  try{
