@@ -22,3 +22,19 @@ test('unapproved image never dispatches guest',async()=>{
  const r=await bootIsolatedFixture({image:'/nonexistent.raw',imageSha256:'invalid',runner:()=>{assert.fail('must not launch');}});
  assert.equal(r.status,'BLOCKED');
 });
+
+test('guest process cancellation and output overflow terminate execution',async()=>{
+ const controller=new AbortController();
+ const pending=runGuestProcess(process.execPath,['-e','setInterval(()=>{},1000)'],{signal:controller.signal});
+ setTimeout(()=>controller.abort(),100);
+ const cancelled=await pending;assert.equal(cancelled.error,'CANCELLED');assert.equal(cancelled.cleanupVerified,true);
+ const overflow=await runGuestProcess(process.execPath,['-e','process.stdout.write("x".repeat(10000));setInterval(()=>{},1000)'],{outputLimit:100});
+ assert.equal(overflow.truncated,true);assert.equal(overflow.stdout.length,100);assert.equal(overflow.cleanupVerified,true);
+});
+test('guest process rejects invalid limits and avoids pre-cancelled launch',async()=>{
+ assert.throws(()=>runGuestProcess(process.execPath,[],{timeoutMs:0}));
+ assert.throws(()=>runGuestProcess(process.execPath,[],{outputLimit:Infinity}));
+ const controller=new AbortController();controller.abort();
+ const result=await runGuestProcess(process.execPath,[],{signal:controller.signal});
+ assert.equal(result.error,'CANCELLED');assert.equal(result.cleanupVerified,false);
+});
