@@ -11,7 +11,7 @@ export async function runMaestroJourney({journey,deviceId,packageName,buildSha25
  if(plan.packageName!==packageName||typeof runner!=='function')throw new Error('Journey does not match verified APK');
  let capturedLog, recording;
  if(recordVideo&&!evidenceStore)throw new Error('Video requires evidence store');
- let report=await executeJourney({journey:plan,deviceId,buildSha256,execute:async({flow})=>{
+ let report=await executeJourney({journey:plan,deviceId,buildSha256,engine:appiumExecutor?'appium':'maestro',execute:async({flow})=>{
   const dir=await mkdtemp(join(tmpdir(),'testlab-maestro-'));
   try{
    const path=join(dir,'flow.yaml');

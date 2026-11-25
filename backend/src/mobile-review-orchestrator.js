@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {compileMaestro,validateJourney} from './mobile-journey.js';
+import {compileExecutionPlan,validateJourney} from './mobile-journey.js';
 import {attestMobileRun,verifyMobileReview} from './signed-mobile-review.js';
 
 // Trusted local worker boundary. The reviewer callback must belong to a separately
@@ -11,10 +11,11 @@ export class MobileReviewOrchestrator {
   this.#supervisor=supervisor;this.#store=store;this.#workerKey=workerPrivateKey;this.#review=review;this.#reviewerPublicKey=reviewerPublicKey;
  }
  async run(input){
-  if(input?.engine!==undefined&&input.engine!=='maestro')throw Error('Signed review currently supports Maestro only');
+  const engine=input?.engine??'maestro';
+  if(!['maestro','appium'].includes(engine))throw Error('Unsupported signed review engine');
   const plan=validateJourney(input?.journey);
   if(plan.packageName!==input.packageName||typeof input.apkSha256!=='string'||!(/^[a-f0-9]{64}$/).test(input.apkSha256))throw new Error('Invalid expected build or journey');
-  const flowSha256=createHash('sha256').update(compileMaestro(plan)).digest('hex');
+  const flowSha256=createHash('sha256').update(compileExecutionPlan(plan,engine)).digest('hex');
   const challengeId=input.reviewChallengeId;
   if(typeof challengeId!=='string'||!(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/).test(challengeId))throw new Error('Reviewer challenge required');
   const blocked=(reason,report=null)=>({status:'BLOCKED',reason,report,productionReady:false,deploymentAuthorized:false});
@@ -23,7 +24,7 @@ export class MobileReviewOrchestrator {
    report=await this.#supervisor.smoke({...input,journey:plan});
    const j=report?.journeyReport,m=j?.evidenceManifest;
    if(report?.status!=='SMOKE_OBSERVED'||report.leaseReleased!==true||report.cleanupVerified!==true||j?.status!=='COMMAND_SUCCEEDED'||j.evidenceStatus!=='CHECKSUM_VERIFIED'||!m)return blocked('Execution or evidence incomplete',report);
-   if(j.deviceId!==input.deviceId||j.buildSha256!==input.apkSha256||j.flowSha256!==flowSha256||j.journeyId!==plan.id||m.reviewChallengeId!==challengeId)return blocked('Execution context mismatch',report);
+   if(j.deviceId!==input.deviceId||j.buildSha256!==input.apkSha256||j.flowSha256!==flowSha256||(j.engine??'maestro')!==engine||j.journeyId!==plan.id||m.reviewChallengeId!==challengeId)return blocked('Execution context mismatch',report);
    const attestation=await attestMobileRun({report:j,store:this.#store,privateKey:this.#workerKey});
    const expected={runId:m.runId,deviceId:input.deviceId,buildSha256:input.apkSha256,flowSha256};
    const review=await this.#review({challengeId,attestation,manifest:m,expected});
