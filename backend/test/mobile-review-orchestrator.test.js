@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,createHash} from 'node:crypto';
-import {compileMaestro} from '../src/mobile-journey.js';
+import {compileMaestro,compileExecutionPlan} from '../src/mobile-journey.js';
 import {reviewMobileRun} from '../src/signed-mobile-review.js';
 import {MobileReviewOrchestrator} from '../src/mobile-review-orchestrator.js';
 const worker=generateKeyPairSync('ed25519'),reviewer=generateKeyPairSync('ed25519');
@@ -24,4 +24,20 @@ test('incomplete execution, mismatched flow and failed reviewer block',async()=>
   const f=fixture();mutate(f);
   assert.equal((await new MobileReviewOrchestrator(f.config).run(f.input)).status,'BLOCKED');
  }
+});
+
+test('Appium review requires its own plan digest and engine identity',async()=>{
+ const f=fixture();
+ f.input.engine='appium';
+ const j=f.report.journeyReport,m=j.evidenceManifest;
+ const maestro=m.flowSha256;
+ m.flowSha256=createHash('sha256').update(compileExecutionPlan(f.input.journey,'appium')).digest('hex');
+ assert.notEqual(m.flowSha256,maestro);
+ j.flowSha256=m.flowSha256;j.engine='appium';
+ const o=new MobileReviewOrchestrator(f.config);
+ assert.equal((await o.run(f.input)).status,'EVIDENCE_REVIEWED');
+ j.engine='maestro';
+ assert.equal((await o.run(f.input)).status,'BLOCKED');
+ j.engine='appium';j.flowSha256=maestro;
+ assert.equal((await o.run(f.input)).status,'BLOCKED');
 });
