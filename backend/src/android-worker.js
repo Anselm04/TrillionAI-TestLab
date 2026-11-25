@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runProcess } from './core.js';
 import { verifyApkIdentity } from './apk-verification.js';
+import { runMaestroJourney } from './maestro-execution.js';
+import { validateJourney } from './mobile-journey.js';
 
 const serialPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const packagePattern = /^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+$/;
@@ -29,12 +31,15 @@ export class AndroidWorker {
     if (this.#quarantined.has(id)) return 'QUARANTINED';
     return this.#active.has(id) ? 'BUSY' : 'IDLE';
   }
-  async smoke({ deviceId, packageName, apkPath, apkSha256, signerSha256, isolationConfirmed = false }) {
+  async smoke({ deviceId, packageName, apkPath, apkSha256, signerSha256, journey, isolationConfirmed = false }) {
     if (this.status(deviceId)!=='IDLE') throw new Error('Device unavailable or not authorized');
     if (isolationConfirmed !== true) throw new Error('Dedicated isolated test host required');
     if (typeof packageName!=='string'||!packagePattern.test(packageName)||packageName.length>200 || typeof apkSha256!=='string'||!digestPattern.test(apkSha256)||typeof apkPath!=='string') throw new Error('Invalid artifact declaration');
+    const plan=journey===undefined?null:validateJourney(journey);
+    if(plan&&plan.packageName!==packageName)throw new Error('Journey package mismatch');
     this.#active.add(deviceId);
     const observations=[];
+    let journeyReport=null;
     let dir, installed=false, touched=false, cleanupVerified=false, error=null;
     const execute=async (checkId,args,timeoutMs=15000)=>{
       const r=await this.#runner('adb',['-s',deviceId,...args],{timeoutMs,outputLimit:64000});
@@ -73,6 +78,10 @@ export class AndroidWorker {
       installed=true;
       const path=await execute('package-presence',['shell','pm','path',packageName]);
       if(!ok(path)||!/^package:\//m.test(path.output)) throw new Error('Declared package not confirmed');
+      if(plan){
+        journeyReport=await runMaestroJourney({journey:plan,deviceId,packageName,buildSha256:apkSha256,runner:this.#runner});
+        if(journeyReport.status!=='COMMAND_SUCCEEDED')throw new Error('Journey execution not successful');
+      }
     } catch(e) { error=String(e?.message??e); }
     finally {
       if(installed) {
@@ -87,6 +96,6 @@ export class AndroidWorker {
       this.#active.delete(deviceId);
       if(dir) { try { await rm(dir,{recursive:true,force:true}); } catch { error=error??'Local artifact cleanup failed'; } }
     }
-    return {deviceId,apkSha256,packageName,status:!error&&installed&&cleanupVerified?'SMOKE_OBSERVED':'BLOCKED',error,cleanupVerified,observations,productionReady:false,deploymentAuthorized:false};
+    return {deviceId,apkSha256,packageName,status:!error&&installed&&cleanupVerified?'SMOKE_OBSERVED':'BLOCKED',error,cleanupVerified,observations,journeyReport,productionReady:false,deploymentAuthorized:false};
   }
 }
