@@ -24,9 +24,9 @@ export class DurableExecution {
    );
    CREATE INDEX IF NOT EXISTS execution_queue ON execution_runs(state,created,id);`);
  }
- submit({profileId,revisionSha256}={}){
+ submit({profileId,revisionSha256,expectedDefinitionSha256}={}){
   const p=this.#profiles.get(profileId);
-  if(!p||!valid(revisionSha256,sha))throw Error('Unknown profile or revision');
+  if(!p||!valid(revisionSha256,sha)||(expectedDefinitionSha256!==undefined&&expectedDefinitionSha256!==p.definitionSha256))throw Error('Unknown profile or revision');
   const runId=randomUUID();
   this.#db.prepare("INSERT INTO execution_runs(id,profile,definition,revision,state,created) VALUES (?,?,?,?,'QUEUED',?)").run(runId,profileId,p.definitionSha256,revisionSha256,Date.now());
   return this.get(runId);
@@ -42,11 +42,11 @@ export class DurableExecution {
   const result=JSON.stringify({reason:'INTERRUPTED_EXECUTION_REQUIRES_REVIEW'});
   return Number(this.#db.prepare("UPDATE execution_runs SET state='BLOCKED',token=NULL,result=?,digest=? WHERE state='RUNNING'").run(result,hash(result)).changes);
  }
- async runNext({checkCapacity,signal}={}){
-  if(typeof checkCapacity!=='function')throw Error('Capacity gate required');
+ async runNext({checkCapacity,signal,expectedRunId}={}){
+  if(typeof checkCapacity!=='function'||(expectedRunId!==undefined&&!valid(expectedRunId,id)))throw Error('Capacity gate required');
   if(signal?.aborted||await checkCapacity()!==true||signal?.aborted)return {status:'PAUSED'};
   const token=randomUUID();
-  const row=this.#db.prepare("UPDATE execution_runs SET state='RUNNING',token=? WHERE id=(SELECT id FROM execution_runs WHERE state='QUEUED' ORDER BY created,id LIMIT 1) AND NOT EXISTS(SELECT 1 FROM execution_runs WHERE state='RUNNING') RETURNING id,profile,definition,revision").get(token);
+  const row=this.#db.prepare("UPDATE execution_runs SET state='RUNNING',token=? WHERE id=(SELECT id FROM execution_runs WHERE state='QUEUED' AND (? IS NULL OR id=?) ORDER BY created,id LIMIT 1) AND NOT EXISTS(SELECT 1 FROM execution_runs WHERE state='RUNNING') RETURNING id,profile,definition,revision").get(token,expectedRunId??null,expectedRunId??null);
   if(!row)return {status:'IDLE_OR_BUSY'};
   const context={runId:row.id,profileId:row.profile,definitionSha256:row.definition,revisionSha256:row.revision};
   let state='BLOCKED',body={reason:'EXECUTION_OR_VERIFICATION_FAILED'};
