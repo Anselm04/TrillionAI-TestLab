@@ -19,3 +19,12 @@ jobs:
         with:
           node-version: '22'
       - run: TESTLAB_TOKEN=$(openssl rand -hex 32) node backend/test/e2e.mjs
+  flutter-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.3'
+          channel: stable
+      - run: cd frontend && flutter pub get && flutter analyze && flutter test
