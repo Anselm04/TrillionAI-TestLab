@@ -2,12 +2,13 @@ import {createHash,randomUUID} from 'node:crypto';
 import {mkdir,writeFile,readFile,open,realpath,stat} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import {join} from 'node:path';
+import {hasMp4Header,VIDEO_LIMIT} from './android-video.js';
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const digest=/^[a-f0-9]{64}$/;
 const id=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
-const limits={log:256000,screenshot:12*1024*1024};
-const names={log:'execution.log',screenshot:'screen.png'};
+const limits={log:256000,screenshot:12*1024*1024,video:VIDEO_LIMIT};
+const names={log:'execution.log',screenshot:'screen.png',video:'clip.mp4'};
 const png=Buffer.from([137,80,78,71,13,10,26,10]);
 const validPng=bytes=>bytes.length>=33&&bytes.subarray(0,8).equals(png)&&bytes.readUInt32BE(8)===13&&bytes.toString('ascii',12,16)==='IHDR'&&bytes.readUInt32BE(16)>0&&bytes.readUInt32BE(20)>0;
 
@@ -22,17 +23,17 @@ export class MobileEvidenceStore{
   if(!info.isDirectory()||(info.mode&0o077)!==0)throw new Error('Evidence root must be private');
   return root;
  }
- async capture({deviceId,buildSha256,flowSha256,log,screenshot,reviewChallengeId}){
+ async capture({deviceId,buildSha256,flowSha256,log,screenshot,video,reviewChallengeId}){
   if(typeof deviceId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)||!digest.test(buildSha256??'')||!digest.test(flowSha256??''))throw new Error('Invalid evidence context');
   if(reviewChallengeId!==undefined&&(typeof reviewChallengeId!=='string'||!id.test(reviewChallengeId)))throw new Error('Invalid review challenge');
   const artifacts=[];
   const root=await this.#directory(),runId=randomUUID(),dir=join(root,runId);
   await mkdir(dir,{mode:0o700});
-  for(const [kind,value] of [['log',log],['screenshot',screenshot]]){
+  for(const [kind,value] of [['log',log],['screenshot',screenshot],['video',video]]){
    if(value===undefined||value===null)continue;
-   if(kind==='log'&&typeof value!=='string'||kind==='screenshot'&&!Buffer.isBuffer(value))throw new Error('Invalid evidence type');
+   if(kind==='log'&&typeof value!=='string'||kind!=='log'&&!Buffer.isBuffer(value))throw new Error('Invalid evidence type');
    const bytes=Buffer.from(value);
-   if(!bytes.length||bytes.length>limits[kind]||(kind==='screenshot'&&!validPng(bytes)))throw new Error('Invalid evidence bytes');
+   if(!bytes.length||bytes.length>limits[kind]||(kind==='screenshot'&&!validPng(bytes))||(kind==='video'&&!hasMp4Header(bytes)))throw new Error('Invalid evidence bytes');
    await writeFile(join(dir,names[kind]),bytes,{flag:'wx',mode:0o600});
    artifacts.push({kind,name:names[kind],bytes:bytes.length,sha256:hash(bytes)});
   }
@@ -43,7 +44,7 @@ export class MobileEvidenceStore{
  }
  async verify(manifest){
   try{
-   if(!id.test(manifest?.runId??'')||!Array.isArray(manifest.artifacts)||!manifest.artifacts.length||manifest.artifacts.length>2)return false;
+   if(!id.test(manifest?.runId??'')||!Array.isArray(manifest.artifacts)||!manifest.artifacts.length||manifest.artifacts.length>3)return false;
    const root=await this.#directory(),dir=join(root,manifest.runId);
    if(await realpath(dir)!==dir)return false;
    const disk=JSON.parse(await readFile(join(dir,'manifest.json'),'utf8'));

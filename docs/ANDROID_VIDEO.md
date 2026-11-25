@@ -1,0 +1,3 @@
+# Android video evidence
+
+Set recordVideo: true on a trusted local journey request with an evidence store. The leased worker requests a bounded 30-second Android screenrecord clip concurrently with Maestro, retrieves it with a 32 MiB cap, and removes the generated remote file. Capture or remote cleanup failure blocks the run. The stored clip is checksum-bound to the evidence manifest. MP4 header validation is structural only; the clip may not cover the complete journey, and physical playback and synchronized start are not qualified. Do not record personal devices or real customer data. Existing offline tests exercise synthetic command responses.

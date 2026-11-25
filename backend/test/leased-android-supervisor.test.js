@@ -106,3 +106,23 @@ test('leased journey stores and verifies execution evidence',async t=>{
  assert.equal(await evidenceStore.verify(report.journeyReport.evidenceManifest),true);
  assert.deepEqual(report.journeyReport.evidenceManifest.artifacts.map(x=>x.kind),['log','screenshot']);
 });
+
+test('leased journey optionally captures video and verifies all evidence',async t=>{
+ const f=await fixture(t),base=fake();
+ const {MobileEvidenceStore}=await import('../src/mobile-evidence.js');
+ const root=await mkdtemp(join(tmpdir(),'testlab-video-evidence-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const evidenceStore=new MobileEvidenceStore(root);
+ const runner=async(binary,args)=>{
+  if(binary==='maestro')return success('Journey completed');
+  if(binary==='adb'&&args[2]==='shell'&&['screenrecord','rm','test'].includes(args[3]))return success('');
+  if(binary==='adb'&&args[2]==='exec-out'&&args[3]==='cat')return {...success(''),stdoutBytes:Buffer.from('00000018667479706d703432000000006d70343269736f6d','hex')};
+  return base(binary,args);
+ };
+ const supervisor=new LeasedAndroidSupervisor({leases:f.a,approvedDevices:['device-1'],evidenceStore,runner});
+ const journey={id:'welcome',packageName:'com.test.app',steps:[{action:'launch'},{action:'assertVisible',text:'Welcome'},{action:'stop'}]};
+ const report=await supervisor.smoke({...f.input,journey,recordVideo:true});
+ assert.equal(report.status,'SMOKE_OBSERVED');
+ assert.equal(report.journeyReport.videoStatus,'CLIP_CAPTURED');
+ assert.deepEqual(report.journeyReport.evidenceManifest.artifacts.map(x=>x.kind),['log','screenshot','video']);
+ assert.equal(await evidenceStore.verify(report.journeyReport.evidenceManifest),true);
+});
