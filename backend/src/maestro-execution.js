@@ -6,7 +6,7 @@ import {collectDeviceDiagnostics} from './device-diagnostics.js';
 import {recordAndroidClip} from './android-video.js';
 
 // Only called inside the trusted leased worker with a verified installed APK.
-export async function runMaestroJourney({journey,deviceId,packageName,buildSha256,runner,evidenceStore,reviewChallengeId,recordVideo=false}){
+export async function runMaestroJourney({journey,deviceId,packageName,buildSha256,runner,evidenceStore,reviewChallengeId,recordVideo=false,appiumExecutor}){
  const plan=validateJourney(journey);
  if(plan.packageName!==packageName||typeof runner!=='function')throw new Error('Journey does not match verified APK');
  let capturedLog, recording;
@@ -16,13 +16,14 @@ export async function runMaestroJourney({journey,deviceId,packageName,buildSha25
   try{
    const path=join(dir,'flow.yaml');
    await writeFile(path,flow,{flag:'wx',mode:0o600});
-   const execute=()=>runner('maestro',['--device',deviceId,'test',path],{timeoutMs:240000,outputLimit:64000});
+   const execute=()=>appiumExecutor?appiumExecutor({journey:plan,deviceId,packageName}):runner('maestro',['--device',deviceId,'test',path],{timeoutMs:240000,outputLimit:64000});
    if(recordVideo)recording=await recordAndroidClip({deviceId,runner,execute});
    const result=recordVideo?recording.result:await execute();
    if(typeof result?.output==='string'&&!result.outputTruncated)capturedLog=result.output;
    return result;
   }finally{await rm(dir,{recursive:true,force:true});}
  }});
+ if(appiumExecutor)report={...report,engine:'appium',independentReview:'PENDING'};
  if(evidenceStore){
   const diagnostics=await collectDeviceDiagnostics({deviceId,packageName,runner});
   report={...report,diagnostics};
