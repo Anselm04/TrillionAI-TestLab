@@ -11,6 +11,7 @@ export class MobileReviewOrchestrator {
   this.#supervisor=supervisor;this.#store=store;this.#workerKey=workerPrivateKey;this.#review=review;this.#reviewerPublicKey=reviewerPublicKey;
  }
  async run(input){
+  if(input?.engine!==undefined&&input.engine!=='maestro')throw Error('Signed review currently supports Maestro only');
   const plan=validateJourney(input?.journey);
   if(plan.packageName!==input.packageName||typeof input.apkSha256!=='string'||!(/^[a-f0-9]{64}$/).test(input.apkSha256))throw new Error('Invalid expected build or journey');
   const flowSha256=createHash('sha256').update(compileMaestro(plan)).digest('hex');
