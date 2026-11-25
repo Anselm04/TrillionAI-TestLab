@@ -39,6 +39,43 @@ class _TestLabHomeState extends State<TestLabHome> {
       if (mounted) setState(() => running = false);
     }
   }
+  Future<void> inspectFarm() async {
+    if (running) return;
+    setState(() { running = true; result = 'Reading device farm...'; });
+    try {
+      final uri = Uri.parse('${endpoint.text.trim().replaceAll(RegExp(r'/ { endpoint.dispose(); token.dispose(); project.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('TrillionAI TestLab')),
+    body: ListView(padding: const EdgeInsets.all(20), children: [
+      const Text('Local-first testing prototype', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 12),
+      TextField(controller: endpoint, decoration: const InputDecoration(labelText: 'Backend URL')),
+      TextField(controller: token, obscureText: true, decoration: const InputDecoration(labelText: 'Local API token')),
+      TextField(controller: project, decoration: const InputDecoration(labelText: 'Workspace project directory')),
+      const SizedBox(height: 20),
+      FilledButton.icon(onPressed: running ? null : runTests, icon: const Icon(Icons.science), label: const Text('Run Node.js test suite')),
+      const SizedBox(height: 12),
+      OutlinedButton.icon(onPressed: running ? null : inspectFarm, icon: const Icon(Icons.devices), label: const Text('Inspect device farm')),
+      const SizedBox(height: 20),
+      SelectableText(result),
+      const SizedBox(height: 24),
+      const Text('Does not certify production readiness or deploy applications.'),
+    ]),
+  );
+}
+), '')}/device-farm');
+      if (uri.scheme != 'https' && !(uri.scheme == 'http' && ['127.0.0.1', 'localhost', '::1'].contains(uri.host))) {
+        throw StateError('Use HTTPS or local loopback');
+      }
+      final response = await http.get(uri, headers: {'Authorization': 'Bearer ${token.text.trim()}'}).timeout(const Duration(seconds: 30));
+      if (mounted) setState(() => result = const JsonEncoder.withIndent('  ').convert(jsonDecode(response.body)));
+    } catch (_) {
+      if (mounted) setState(() => result = 'Device farm request failed.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
   @override
   void dispose() { endpoint.dispose(); token.dispose(); project.dispose(); super.dispose(); }
   @override
