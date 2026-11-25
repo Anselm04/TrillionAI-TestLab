@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "worker:mobile": "node src/worker-main.js",
+    "reviewer:mobile": "node src/reviewer-main.js"
   }
 }
