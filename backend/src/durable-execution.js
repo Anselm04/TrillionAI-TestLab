@@ -22,7 +22,9 @@ export class DurableExecution {
     revision TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','VERIFIED','BLOCKED')),
     token TEXT, result TEXT, digest TEXT, created INTEGER NOT NULL
    );
-   CREATE INDEX IF NOT EXISTS execution_queue ON execution_runs(state,created,id);`);
+   CREATE INDEX IF NOT EXISTS execution_queue ON execution_runs(state,created,id);
+   CREATE TABLE IF NOT EXISTS execution_retests(parent_id TEXT PRIMARY KEY, child_id TEXT NOT NULL UNIQUE, root_id TEXT NOT NULL, attempt INTEGER NOT NULL);
+   CREATE INDEX IF NOT EXISTS execution_retest_root ON execution_retests(root_id);`);
  }
  submit({profileId,revisionSha256,expectedDefinitionSha256}={}){
   const p=this.#profiles.get(profileId);
@@ -44,6 +46,31 @@ export class DurableExecution {
   const rows=this.#db.prepare('SELECT rowid AS sequence,id FROM execution_runs WHERE rowid>? ORDER BY rowid LIMIT ?').all(after,limit+1);
   const page=rows.slice(0,limit);
   return {entries:page.map(r=>({sequence:r.sequence,...this.get(r.id)})),nextCursor:page.at(-1)?.sequence??after,hasMore:rows.length>limit};
+ }
+ // Retests are permitted only for a reverified failed execution of a
+ // currently registered, unchanged profile. No automatic replay of blocked runs.
+ async scheduleRetest({parentRunId,verifyStoredObservation,maxAttempts=2,signal}={}){
+  if(!valid(parentRunId,id)||typeof verifyStoredObservation!=='function'||!Number.isSafeInteger(maxAttempts)||maxAttempts<1||maxAttempts>3)throw Error('Invalid retest request');
+  const parent=this.get(parentRunId),o=parent?.result?.observation;
+  if(signal?.aborted||parent?.state!=='VERIFIED'||parent.integrity!==true||o?.status!=='FAILED'||o.runId!==parentRunId||o.definitionSha256!==parent.definitionSha256||o.revisionSha256!==parent.revisionSha256)return {status:'NOT_ELIGIBLE'};
+  const profile=this.#profiles.get(parent.profileId);
+  if(!profile||profile.definitionSha256!==parent.definitionSha256)return {status:'PROFILE_CHANGED'};
+  try{if(await verifyStoredObservation(structuredClone(o),{runId:parentRunId,profileId:parent.profileId,revisionSha256:parent.revisionSha256,definitionSha256:parent.definitionSha256})!==true||signal?.aborted)return {status:'NOT_ELIGIBLE'};}catch{return {status:'NOT_ELIGIBLE'};}
+  this.#db.exec('BEGIN IMMEDIATE');
+  try{
+   const current=this.get(parentRunId);
+   if(current?.state!=='VERIFIED'||current.integrity!==true||JSON.stringify(current.result)!==JSON.stringify(parent.result)){this.#db.exec('COMMIT');return {status:'NOT_ELIGIBLE'};}
+   const existing=this.#db.prepare('SELECT child_id FROM execution_retests WHERE parent_id=?').get(parentRunId);
+   if(existing){this.#db.exec('COMMIT');return {status:'ALREADY_SCHEDULED',runId:existing.child_id};}
+   const lineage=this.#db.prepare('SELECT root_id,attempt FROM execution_retests WHERE child_id=?').get(parentRunId);
+   const rootId=lineage?.root_id??parentRunId,attempt=(lineage?.attempt??0)+1;
+   if(attempt>maxAttempts){this.#db.exec('COMMIT');return {status:'RETRY_BUDGET_EXHAUSTED'};}
+   const runId=randomUUID();
+   this.#db.prepare("INSERT INTO execution_runs(id,profile,definition,revision,state,created) VALUES (?,?,?,?,'QUEUED',?)").run(runId,parent.profileId,parent.definitionSha256,parent.revisionSha256,Date.now());
+   this.#db.prepare('INSERT INTO execution_retests(parent_id,child_id,root_id,attempt) VALUES (?,?,?,?)').run(parentRunId,runId,rootId,attempt);
+   this.#db.exec('COMMIT');
+   return {status:'SCHEDULED',runId,rootId,attempt};
+  }catch(e){this.#db.exec('ROLLBACK');throw e;}
  }
  recoverInterrupted(){
   const result=JSON.stringify({reason:'INTERRUPTED_EXECUTION_REQUIRES_REVIEW'});
