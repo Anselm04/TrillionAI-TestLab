@@ -5,7 +5,7 @@ import {executeJourney,validateJourney} from './mobile-journey.js';
 import {collectDeviceDiagnostics} from './device-diagnostics.js';
 
 // Only called inside the trusted leased worker with a verified installed APK.
-export async function runMaestroJourney({journey,deviceId,packageName,buildSha256,runner,evidenceStore}){
+export async function runMaestroJourney({journey,deviceId,packageName,buildSha256,runner,evidenceStore,reviewChallengeId}){
  const plan=validateJourney(journey);
  if(plan.packageName!==packageName||typeof runner!=='function')throw new Error('Journey does not match verified APK');
  let capturedLog;
@@ -29,7 +29,7 @@ export async function runMaestroJourney({journey,deviceId,packageName,buildSha25
   // End-of-journey device screen, before APK uninstall; not an assertion-time screenshot.
   const screen=await runner('adb',['-s',deviceId,'exec-out','screencap','-p'],{timeoutMs:15000,outputLimit:12*1024*1024,binaryOutput:true});
   const screenshot=screen?.exitCode===0&&!screen.error&&!screen.timedOut&&!screen.outputTruncated&&Buffer.isBuffer(screen.stdoutBytes)?screen.stdoutBytes:undefined;
-  const manifest=await evidenceStore.capture({deviceId,buildSha256,flowSha256:report.flowSha256,log:capturedLog,screenshot});
+  const manifest=await evidenceStore.capture({deviceId,buildSha256,flowSha256:report.flowSha256,log:capturedLog,screenshot,reviewChallengeId});
   if(!screenshot)return {...report,evidenceStatus:'CAPTURE_FAILED',evidenceManifest:manifest};
   return {...report,evidenceStatus:await evidenceStore.verify(manifest)?'CHECKSUM_VERIFIED':'INVALID',evidenceManifest:manifest};
  }catch{return {...report,evidenceStatus:'CAPTURE_FAILED'};}

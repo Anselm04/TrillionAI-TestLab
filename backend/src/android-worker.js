@@ -33,7 +33,7 @@ export class AndroidWorker {
     if (this.#quarantined.has(id)) return 'QUARANTINED';
     return this.#active.has(id) ? 'BUSY' : 'IDLE';
   }
-  async smoke({ deviceId, packageName, apkPath, apkSha256, signerSha256, journey, isolationConfirmed = false }) {
+  async smoke({ deviceId, packageName, apkPath, apkSha256, signerSha256, journey, reviewChallengeId, isolationConfirmed = false }) {
     if (this.status(deviceId)!=='IDLE') throw new Error('Device unavailable or not authorized');
     if (isolationConfirmed !== true) throw new Error('Dedicated isolated test host required');
     if (typeof packageName!=='string'||!packagePattern.test(packageName)||packageName.length>200 || typeof apkSha256!=='string'||!digestPattern.test(apkSha256)||typeof apkPath!=='string') throw new Error('Invalid artifact declaration');
@@ -81,7 +81,7 @@ export class AndroidWorker {
       const path=await execute('package-presence',['shell','pm','path',packageName]);
       if(!ok(path)||!/^package:\//m.test(path.output)) throw new Error('Declared package not confirmed');
       if(plan){
-        journeyReport=await runMaestroJourney({journey:plan,deviceId,packageName,buildSha256:apkSha256,runner:this.#runner,evidenceStore:this.#evidenceStore});
+        journeyReport=await runMaestroJourney({journey:plan,deviceId,packageName,buildSha256:apkSha256,runner:this.#runner,evidenceStore:this.#evidenceStore,reviewChallengeId});
         if(journeyReport.status!=='COMMAND_SUCCEEDED'||(this.#evidenceStore&&journeyReport.evidenceStatus!=='CHECKSUM_VERIFIED'))throw new Error('Journey execution not successful');
       }
     } catch(e) { error=String(e?.message??e); }
