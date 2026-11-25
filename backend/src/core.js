@@ -15,13 +15,13 @@ export async function resolveProject(root, name) {
 
 export function runProcess(binary, args, { timeoutMs = 120000, outputLimit = 128000 } = {}) {
   return new Promise((done) => {
-    let output = '', finished = false, timedOut = false;
+    let output = '', finished = false, timedOut = false, outputTruncated = false;
     const child = spawn(binary, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
-    const collect = chunk => { if (output.length < outputLimit) output += chunk.toString().slice(0, outputLimit - output.length); };
+    const collect = chunk => { const text=chunk.toString(); if(text.length>outputLimit-output.length)outputTruncated=true; if (output.length < outputLimit) output += text.slice(0, outputLimit - output.length); };
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    const complete = (result) => { if (!finished) { finished = true; clearTimeout(timer); done({ ...result, output: output.slice(0, outputLimit), timedOut }); } };
+    const complete = (result) => { if (!finished) { finished = true; clearTimeout(timer); done({ ...result, output: output.slice(0, outputLimit), timedOut, outputTruncated }); } };
     child.on('error', err => complete({ exitCode: null, error: err.message }));
     child.on('close', code => complete({ exitCode: code }));
   });

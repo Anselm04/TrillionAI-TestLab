@@ -1,0 +1,3 @@
+# Mobile evidence
+
+Trusted operators may configure a private local evidence directory via MobileEvidenceStore and pass the store to LeasedAndroidSupervisor. Maestro output is saved with device, build and flow identifiers and SHA-256 checksums. When configured, capture or verification failure blocks the run. Screenshot bytes can be stored and checked for a PNG header; actual screenshot and video capture are not implemented. Checksums detect changes relative to a trusted manifest, not forged manifests. Do not expose logs publicly; they may contain synthetic account details. Signed independent review, retention policy, total storage quotas and hardware qualification remain outstanding.

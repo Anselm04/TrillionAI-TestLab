@@ -90,3 +90,17 @@ test('failed journey is cleaned up but remains blocked and quarantined',async t=
  assert.equal(report.journeyReport.status,'COMMAND_FAILED');
  assert.equal(f.b.status('device-1'),'QUARANTINED');
 });
+
+test('leased journey stores and verifies execution evidence',async t=>{
+ const f=await fixture(t),base=fake();
+ const {MobileEvidenceStore}=await import('../src/mobile-evidence.js');
+ const root=await mkdtemp(join(tmpdir(),'testlab-journey-evidence-'));
+ t.after(()=>rm(root,{recursive:true,force:true}));
+ const evidenceStore=new MobileEvidenceStore(root);
+ const s=new LeasedAndroidSupervisor({leases:f.a,approvedDevices:['device-1'],evidenceStore,runner:async(binary,args)=>binary==='maestro'?success('Journey completed'):base(binary,args)});
+ const journey={id:'welcome',packageName:'com.test.app',steps:[{action:'launch'},{action:'assertVisible',text:'Welcome'},{action:'stop'}]};
+ const report=await s.smoke({...f.input,journey});
+ assert.equal(report.status,'SMOKE_OBSERVED');
+ assert.equal(report.journeyReport.evidenceStatus,'CHECKSUM_VERIFIED');
+ assert.equal(await evidenceStore.verify(report.journeyReport.evidenceManifest),true);
+});
