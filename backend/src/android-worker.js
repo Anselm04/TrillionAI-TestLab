@@ -21,10 +21,12 @@ export class AndroidWorker {
   #quarantined = new Set();
   #approved;
   #runner;
-  constructor({ approvedDevices, runner = runProcess } = {}) {
+  #evidenceStore;
+  constructor({ approvedDevices, runner = runProcess, evidenceStore } = {}) {
     if (!Array.isArray(approvedDevices) || !approvedDevices.length || approvedDevices.some(x=>typeof x!=='string'||!serialPattern.test(x))) throw new Error('Explicit device allowlist required');
     this.#approved = new Set(approvedDevices);
     this.#runner = runner;
+    this.#evidenceStore = evidenceStore;
   }
   status(id) {
     if (!this.#approved.has(id)) return 'UNAUTHORIZED';
@@ -79,8 +81,8 @@ export class AndroidWorker {
       const path=await execute('package-presence',['shell','pm','path',packageName]);
       if(!ok(path)||!/^package:\//m.test(path.output)) throw new Error('Declared package not confirmed');
       if(plan){
-        journeyReport=await runMaestroJourney({journey:plan,deviceId,packageName,buildSha256:apkSha256,runner:this.#runner});
-        if(journeyReport.status!=='COMMAND_SUCCEEDED')throw new Error('Journey execution not successful');
+        journeyReport=await runMaestroJourney({journey:plan,deviceId,packageName,buildSha256:apkSha256,runner:this.#runner,evidenceStore:this.#evidenceStore});
+        if(journeyReport.status!=='COMMAND_SUCCEEDED'||(this.#evidenceStore&&journeyReport.evidenceStatus!=='CHECKSUM_VERIFIED'))throw new Error('Journey execution not successful');
       }
     } catch(e) { error=String(e?.message??e); }
     finally {
