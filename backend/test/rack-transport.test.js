@@ -1,0 +1,24 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {RackCoordinator} from '../src/rack-coordinator.js';
+import {createRackTransport,createRackClient} from '../src/rack-transport.js';
+test('host credentials bind inventory and lease completion across real HTTP',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'rack-http-'));const rack=new RackCoordinator(join(dir,'rack.db'));
+ const a={host:'mac',token:'a'.repeat(64),devices:[{id:'iphone',platform:'ios'}]},b={host:'linux',token:'b'.repeat(64),devices:[{id:'android',platform:'android'}]};
+ const service=createRackTransport({rack,hosts:[a,b]});
+ t.after(async()=>{await new Promise(resolve=>service.server.close(resolve));rack.close();await rm(dir,{recursive:true,force:true});});
+ const {port}=await service.listen();
+ const mac=createRackClient({port,...a}),linux=createRackClient({port,...b});
+ await assert.rejects(createRackClient({port,host:'mac',token:b.token}).heartbeat([]));
+ await assert.rejects(linux.heartbeat([{id:'iphone',platform:'ios',ready:true}]));
+ await mac.heartbeat([{...a.devices[0],ready:true}]);
+ await linux.heartbeat([{...b.devices[0],ready:true}]);
+ const {lease}=await mac.claim({platform:'ios',jobId:'job-1'});assert.ok(lease);
+ assert.equal((await mac.claim({platform:'ios',jobId:'job-2'})).lease,null);
+ await assert.rejects(linux.finish({...lease,cleanupVerified:true}));
+ assert.equal((await mac.finish({...lease,cleanupVerified:true})).accepted,true);
+ assert.equal((await mac.finish({...lease,cleanupVerified:true})).accepted,false);
+});
