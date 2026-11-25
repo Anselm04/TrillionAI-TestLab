@@ -14,7 +14,7 @@ async function read(req){
 }
 // Bind only to loopback. Remote workers require an operator-managed TLS tunnel.
 // Each credential is bound to a host and a fixed device allowlist.
-export function createRackTransport({rack,hosts}={}){
+export function createRackTransport({rack,hosts,jobs}={}){
  if(!rack||!Array.isArray(hosts)||!hosts.length||hosts.length>500)throw Error('Trusted rack configuration required');
  const auth=new Map(),tokens=new Set(),devices=new Set();
  for(const h of hosts){
@@ -28,7 +28,7 @@ export function createRackTransport({rack,hosts}={}){
  }
  let active=0;
  const server=createServer({requestTimeout:10000,headersTimeout:5000,maxHeaderSize:8192},async(req,res)=>{
-  if(req.method!=='POST'||!['/heartbeat','/claim','/finish'].includes(req.url))return send(res,404,{error:'NOT_FOUND'});
+  if(req.method!=='POST'||!['/heartbeat','/claim','/finish','/jobs/poll','/jobs/finish'].includes(req.url))return send(res,404,{error:'NOT_FOUND'});
   const host=req.headers['x-testlab-host'],header=req.headers.authorization,entry=auth.get(host);
   if(!entry||typeof header!=='string'||!header.startsWith('Bearer ')||!tokenPattern.test(header.slice(7))||!timingSafeEqual(hash(header.slice(7)),entry.digest))return send(res,401,{error:'UNAUTHORIZED'});
   if(req.headers['content-type']!=='application/json')return send(res,415,{error:'JSON_REQUIRED'});
@@ -36,6 +36,15 @@ export function createRackTransport({rack,hosts}={}){
   active++;
   try{
    const b=await read(req);
+   if(req.url==='/jobs/poll'){
+    if(!jobs||![...entry.allowed.values()].includes(b.platform))throw Error('Unauthorized platform');
+    return send(res,200,{job:jobs.claim({host,platform:b.platform})});
+   }
+   if(req.url==='/jobs/finish'){
+    if(!jobs)throw Error('Jobs unavailable');
+    // Completion is a worker report, not an independent release certificate.
+    return send(res,200,{accepted:jobs.finish({host,jobId:b.jobId,token:b.token,result:b.result})});
+   }
    if(req.url==='/heartbeat'){
     if(!Array.isArray(b.devices)||b.devices.some(d=>entry.allowed.get(d?.id)!==d?.platform))throw Error('Unauthorized device');
     rack.heartbeatHost(host,b.devices);return send(res,200,{accepted:true});
@@ -60,5 +69,5 @@ export function createRackClient({port,host,token,request=fetch}={}){
   finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
  }
- return {heartbeat:devices=>call('/heartbeat',{devices}),claim:({platform,jobId})=>call('/claim',{platform,jobId}),finish:lease=>call('/finish',lease)};
+ return {poll:platform=>call('/jobs/poll',{platform}),complete:({jobId,token,result})=>call('/jobs/finish',{jobId,token,result}),heartbeat:devices=>call('/heartbeat',{devices}),claim:({platform,jobId})=>call('/claim',{platform,jobId}),finish:lease=>call('/finish',lease)};
 }
