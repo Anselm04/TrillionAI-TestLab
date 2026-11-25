@@ -1,0 +1,34 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {MobileJobs,runMobileJob} from '../src/mobile-jobs.js';
+import {RackCoordinator} from '../src/rack-coordinator.js';
+import {createRackTransport,createRackClient} from '../src/rack-transport.js';
+test('submitted profile reaches reviewed worker through actual rack transport',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'mobile-jobs-'));
+ const jobs=new MobileJobs(join(dir,'jobs.db'),{profiles:[{id:'smoke-ios',platform:'ios'}]});
+ const rack=new RackCoordinator(join(dir,'rack.db'));
+ const host={host:'mac',token:'a'.repeat(64),devices:[{id:'iphone',platform:'ios'}]};
+ const transport=createRackTransport({rack,hosts:[host]});
+ t.after(async()=>{await new Promise(r=>transport.server.close(r));jobs.close();rack.close();await rm(dir,{recursive:true,force:true});});
+ const {port}=await transport.listen(),client=createRackClient({port,...host});
+ await client.heartbeat([{...host.devices[0],ready:true}]);
+ assert.throws(()=>jobs.submit('unknown'));
+ const submitted=jobs.submit('smoke-ios'),job=jobs.claim({host:'mac',platform:'ios'});
+ assert.equal(job.jobId,submitted.jobId);assert.equal(jobs.claim({host:'mac',platform:'ios'}),null);
+ const result=await runMobileJob({job,rackClient:client,execute:async c=>{
+  assert.equal(c.profileId,'smoke-ios');assert.equal(c.deviceId,'iphone');
+  return {status:'EVIDENCE_REVIEWED',report:{cleanupVerified:true,leaseReleased:true}};
+ }});
+ assert.equal(result.status,'EVIDENCE_REVIEWED');
+ assert.equal(jobs.finish({...job,host:'other',result}),false);
+ assert.equal(jobs.finish({...job,result}),true);
+ assert.equal(jobs.get(job.jobId).state,'REVIEWED');
+ assert.equal(jobs.finish({...job,result}),false);
+ const second=jobs.submit('smoke-ios'),next=jobs.claim({host:'mac',platform:'ios'});
+ const failed=await runMobileJob({job:next,rackClient:client,execute:async()=>{throw Error('fixture failure');}});
+ assert.equal(failed.status,'BLOCKED');assert.equal(jobs.finish({...next,result:failed}),true);
+ assert.equal(jobs.get(second.jobId).state,'BLOCKED');assert.equal(rack.inventory()[0].state,'QUARANTINED');
+});
