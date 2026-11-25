@@ -11,12 +11,14 @@ async function fixture(t){
  t.after(()=>rm(dir,{recursive:true,force:true}));
  const apkPath=join(dir,'test.apk'), bytes=Buffer.from('fixture');
  await writeFile(apkPath,bytes);
- return {deviceId:'test-1',packageName:'com.test.app',apkPath,apkSha256:createHash('sha256').update(bytes).digest('hex'),isolationConfirmed:true};
+ return {deviceId:'test-1',packageName:'com.test.app',apkPath,apkSha256:createHash('sha256').update(bytes).digest('hex'),signerSha256:['a'.repeat(64)],isolationConfirmed:true};
 }
 const success=output=>({exitCode:0,output,timedOut:false});
 function fake({failInstall=false,failCleanup=false,existing=false}={}){
  let present=existing;
  return async(binary,args)=>{
+  if(binary==='apksigner')return success('Signer #1 certificate SHA-256 digest: '+'a'.repeat(64)+'\n');
+  if(binary==='aapt2')return success("package: name='com.test.app' versionCode='1'\n");
   assert.equal(binary,'adb');assert.deepEqual(args.slice(0,2),['-s','test-1']);
   const command=args.slice(2).join(' ');
   if(command==='get-state')return success('device\n');
