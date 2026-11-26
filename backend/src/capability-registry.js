@@ -1,3 +1,5 @@
+import { classifyExecution } from './evidence.js';
+
 // TestLab's observable coverage inventory. Entries are declarations of what
 // verification adapters can execute, never probabilities or product guarantees.
 export const TEST_DOMAINS = Object.freeze([
@@ -99,8 +101,8 @@ export function summarizeExecutedChecks(plan, observations) {
     const obs = observations.find(o=>o.checkId === check.checkId && check.checkId !== null);
     if (!obs) return {...check};
     if (!IMPLEMENTED_CHECKS.some(x=>x.id === check.checkId && x.domain === check.domain)) throw new Error('Unrecognized check');
-    if (obs.status === 'PASSED' && obs.exitCode !== 0) throw new Error('Evidence mismatch: PASS without exit code zero');
-    if (obs.status === 'FAILED' && (!Number.isInteger(obs.exitCode) || obs.exitCode === 0)) throw new Error('Evidence mismatch: FAILED without nonzero exit');
+    const expected = classifyExecution({exitCode:obs.exitCode,timedOut:obs.timedOut,error:obs.evidence?.executorError ?? obs.error});
+    if (obs.status !== expected.status) throw new Error('Evidence mismatch: inconsistent execution outcome');
     return { ...check, status: obs.status, reason: obs.reason ?? 'See execution evidence', evidence: [obs.checkId] };
   });
   // It is impossible for this function to label the entire product production ready.

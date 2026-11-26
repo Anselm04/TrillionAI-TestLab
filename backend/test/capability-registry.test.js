@@ -63,3 +63,22 @@ test('summary rejects duplicate domains and inconsistent declared check identiti
   duplicate.checks.push({...duplicate.checks[0]});
   assert.throws(() => summarizeExecutedChecks(duplicate, []), /Invalid plan check/);
 });
+
+test('capability summaries classify execution consistently with sealed reports', () => {
+  const plan=planRequestedChecks(['functional']);
+  const checkId='node.builtin-test';
+  for(const fixture of [
+    {status:'PASSED',exitCode:0,timedOut:true},
+    {status:'PASSED',exitCode:0,evidence:{executorError:'fixture interruption'}},
+    {status:'FAILED',exitCode:125},
+    {status:'FAILED',exitCode:-1},
+    {status:'TIMEOUT',exitCode:0,timedOut:false},
+    {status:'INFRASTRUCTURE_ERROR',exitCode:0},
+  ]) assert.throws(()=>summarizeExecutedChecks(plan,[{checkId,...fixture}]),/Evidence mismatch/);
+  for(const fixture of [
+    {status:'PASSED',exitCode:0},
+    {status:'FAILED',exitCode:1},
+    {status:'TIMEOUT',exitCode:null,timedOut:true},
+    {status:'INFRASTRUCTURE_ERROR',exitCode:125},
+  ]) assert.equal(summarizeExecutedChecks(plan,[{checkId,...fixture}]).checks[0].status,fixture.status);
+});
