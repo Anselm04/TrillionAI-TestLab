@@ -1,0 +1,1053 @@
+package v1
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/websocket/v2"
+	"github.com/pkg/errors"
+	"github.com/valyala/fasthttp"
+
+	"github.com/kubeshop/testkube/internal/app/api/apiutils"
+	"github.com/kubeshop/testkube/internal/common"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/datefilter"
+	testworkflow2 "github.com/kubeshop/testkube/pkg/repository/testworkflow"
+	"github.com/kubeshop/testkube/pkg/testworkflows/executionworker/executionworkertypes"
+)
+
+const workflowNotificationHeartbeatInterval = 20 * time.Second
+
+func parseResumeAfterSeqNo(c *fiber.Ctx) (uint32, error) {
+	value := c.Query("resumeAfterSeqNo", "")
+	if value == "" {
+		return 0, nil
+	}
+
+	resumeAfterSeqNo, err := strconv.ParseUint(value, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+
+	return uint32(resumeAfterSeqNo), nil
+}
+
+func workflowNotificationEventType(notification testkube.TestWorkflowExecutionNotification) string {
+	switch {
+	case notification.Result != nil:
+		return "result"
+	case notification.Output != nil:
+		return "output"
+	case notification.Log != "":
+		return "log"
+	default:
+		return ""
+	}
+}
+
+func workflowNotificationResumable(notification testkube.TestWorkflowExecutionNotification) bool {
+	if notification.Temporary {
+		return false
+	}
+	return notification.Result != nil || notification.Output != nil || notification.Log != ""
+}
+
+func streamableWorkflowNotifications(source <-chan *testkube.TestWorkflowExecutionNotification, resumeAfterSeqNo uint32) <-chan testkube.TestWorkflowExecutionNotification {
+	return streamableWorkflowNotificationsWithHeartbeat(nil, source, resumeAfterSeqNo, workflowNotificationHeartbeatInterval)
+}
+
+func streamableWorkflowNotificationsWithHeartbeat(done <-chan struct{}, source <-chan *testkube.TestWorkflowExecutionNotification, resumeAfterSeqNo uint32, heartbeatInterval time.Duration) <-chan testkube.TestWorkflowExecutionNotification {
+	notifications := make(chan testkube.TestWorkflowExecutionNotification)
+	go func() {
+		defer close(notifications)
+
+		var seqNo uint32
+		var heartbeat <-chan time.Time
+		var heartbeatTicker *time.Ticker
+		if heartbeatInterval > 0 {
+			heartbeatTicker = time.NewTicker(heartbeatInterval)
+			heartbeat = heartbeatTicker.C
+			defer heartbeatTicker.Stop()
+		}
+		send := func(notification testkube.TestWorkflowExecutionNotification) bool {
+			select {
+			case notifications <- notification:
+				return true
+			case <-done:
+				return false
+			}
+		}
+
+		for {
+			select {
+			case <-done:
+				return
+			case notification, ok := <-source:
+				if !ok {
+					return
+				}
+				if notification == nil {
+					continue
+				}
+
+				streamNotification := *notification
+				if streamNotification.EventType == "" {
+					streamNotification.EventType = workflowNotificationEventType(streamNotification)
+				}
+				if workflowNotificationResumable(streamNotification) {
+					seqNo++
+					streamNotification.SeqNo = int32(seqNo)
+					if seqNo <= resumeAfterSeqNo {
+						continue
+					}
+				}
+
+				if !send(streamNotification) {
+					return
+				}
+			case <-heartbeat:
+				heartbeatNotification := testkube.TestWorkflowExecutionNotification{
+					EventType: "heartbeat",
+				}
+				if seqNo > 0 {
+					heartbeatNotification.SeqNo = int32(seqNo)
+				}
+				if !send(heartbeatNotification) {
+					return
+				}
+			}
+		}
+	}()
+	return notifications
+}
+
+// writeWorkflowNotificationEvent writes a single notification as a server-sent event and flushes it.
+func writeWorkflowNotificationEvent(w *bufio.Writer, enc *json.Encoder, n testkube.TestWorkflowExecutionNotification) error {
+	if n.SeqNo > 0 {
+		if _, err := fmt.Fprintf(w, "id: %d\n", n.SeqNo); err != nil {
+			return errors.Wrap(err, "printing SSE id")
+		}
+	}
+	if n.EventType != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", n.EventType); err != nil {
+			return errors.Wrap(err, "printing SSE event")
+		}
+	}
+	if _, err := io.WriteString(w, "data: "); err != nil {
+		return errors.Wrap(err, "printing SSE data prefix")
+	}
+	if err := enc.Encode(n); err != nil {
+		return errors.Wrap(err, "encoding value")
+	}
+	if _, err := io.WriteString(w, "\n"); err != nil {
+		return errors.Wrap(err, "printing new line")
+	}
+	return errors.Wrap(w.Flush(), "flushing stream body")
+}
+
+// streamNotifications streams the notifications as server-sent events.
+func (s *TestkubeAPI) streamNotifications(ctx *fasthttp.RequestCtx, watchCtx context.Context, stop context.CancelFunc, id string, notifications executionworkertypes.NotificationsWatcher, resumeAfterSeqNo uint32) {
+	// Initiate processing event stream
+	ctx.SetContentType("text/event-stream")
+	ctx.Response.Header.Set("Cache-Control", "no-cache")
+	ctx.Response.Header.Set("Connection", "keep-alive")
+	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
+
+	// Stream the notifications
+	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		s.writeNotificationStream(w, watchCtx, stop, id, notifications, resumeAfterSeqNo, workflowNotificationHeartbeatInterval)
+	})
+}
+
+// writeNotificationStream writes notifications to w until the source is exhausted or a write fails, then calls stop.
+func (s *TestkubeAPI) writeNotificationStream(w *bufio.Writer, watchCtx context.Context, stop context.CancelFunc, id string, notifications executionworkertypes.NotificationsWatcher, resumeAfterSeqNo uint32, heartbeatInterval time.Duration) {
+	defer stop()
+
+	if err := w.Flush(); err != nil {
+		s.Log.Debugw("notification stream closed by the client", "error", err, "id", id)
+		return
+	}
+
+	enc := json.NewEncoder(w)
+
+	for n := range streamableWorkflowNotificationsWithHeartbeat(watchCtx.Done(), notifications.Channel(), resumeAfterSeqNo, heartbeatInterval) {
+		if err := writeWorkflowNotificationEvent(w, enc, n); err != nil {
+			s.Log.Debugw("notification stream closed by the client", "error", err, "id", id)
+			return
+		}
+	}
+}
+
+func (s *TestkubeAPI) StreamTestWorkflowExecutionNotificationsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		id := strings.Clone(c.Params("executionID"))
+		errPrefix := fmt.Sprintf("failed to stream test workflow execution notifications '%s'", id)
+		resumeAfterSeqNo, err := parseResumeAfterSeqNo(c)
+		if err != nil {
+			return s.BadRequest(c, errPrefix, "could not parse query string", err)
+		}
+
+		// Fetch execution from database
+		execution, err := s.TestWorkflowResults.Get(ctx, id)
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		// Check for the logs
+		watchCtx, stopWatching := context.WithCancel(ctx)
+		notifications := s.ExecutionWorkerClient.Notifications(watchCtx, execution.Id, executionworkertypes.NotificationsOptions{
+			Hints: executionworkertypes.Hints{
+				Namespace:   execution.Namespace,
+				ScheduledAt: common.Ptr(execution.ScheduledAt),
+				Signature:   execution.Signature,
+			},
+		})
+		if notifications.Err() != nil {
+			stopWatching()
+			return s.BadRequest(c, errPrefix, "fetching notifications", notifications.Err())
+		}
+
+		s.streamNotifications(ctx, watchCtx, stopWatching, id, notifications, resumeAfterSeqNo)
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) StreamTestWorkflowExecutionServiceNotificationsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		executionID := c.Params("executionID")
+		serviceName := c.Params("serviceName")
+		serviceIndex := c.Params("serviceIndex")
+		errPrefix := fmt.Sprintf("failed to stream test workflow execution service '%s' instance '%s' notifications '%s'",
+			serviceName, serviceIndex, executionID)
+		resumeAfterSeqNo, err := parseResumeAfterSeqNo(c)
+		if err != nil {
+			return s.BadRequest(c, errPrefix, "could not parse query string", err)
+		}
+
+		// Fetch execution from database
+		execution, err := s.TestWorkflowResults.Get(ctx, executionID)
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		found := false
+		if execution.Workflow != nil {
+			found = execution.Workflow.HasService(serviceName)
+		}
+
+		if !found {
+			return s.ClientError(c, errPrefix, errors.New("unknown service for test workflow execution"))
+		}
+
+		// Check for the logs
+		id := fmt.Sprintf("%s-%s-%s", execution.Id, serviceName, serviceIndex)
+		watchCtx, stopWatching := context.WithCancel(ctx)
+		notifications := s.ExecutionWorkerClient.Notifications(watchCtx, id, executionworkertypes.NotificationsOptions{
+			Hints: executionworkertypes.Hints{
+				Namespace:   execution.Namespace,
+				ScheduledAt: common.Ptr(execution.ScheduledAt),
+			},
+		})
+		if notifications.Err() != nil {
+			stopWatching()
+			return s.BadRequest(c, errPrefix, "fetching notifications", notifications.Err())
+		}
+
+		s.streamNotifications(ctx, watchCtx, stopWatching, id, notifications, resumeAfterSeqNo)
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) StreamTestWorkflowExecutionParallelStepNotificationsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		executionID := c.Params("executionID")
+		ref := c.Params("ref")
+		workerIndex := c.Params("workerIndex")
+		errPrefix := fmt.Sprintf("failed to stream test workflow execution parallel step '%s' instance '%s' notifications '%s'",
+			ref, workerIndex, executionID)
+		resumeAfterSeqNo, err := parseResumeAfterSeqNo(c)
+		if err != nil {
+			return s.BadRequest(c, errPrefix, "could not parse query string", err)
+		}
+
+		// Fetch execution from database
+		execution, err := s.TestWorkflowResults.Get(ctx, executionID)
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		reference := execution.GetParallelStepReference(ref)
+		if reference == "" {
+			return s.ClientError(c, errPrefix, errors.New("unknown parallel step for test workflow execution"))
+		}
+
+		// Check for the logs
+		id := fmt.Sprintf("%s-%s-%s", execution.Id, reference, workerIndex)
+		watchCtx, stopWatching := context.WithCancel(ctx)
+		notifications := s.ExecutionWorkerClient.Notifications(watchCtx, id, executionworkertypes.NotificationsOptions{
+			Hints: executionworkertypes.Hints{
+				Namespace:   execution.Namespace,
+				ScheduledAt: common.Ptr(execution.ScheduledAt),
+			},
+		})
+		if notifications.Err() != nil {
+			stopWatching()
+			return s.BadRequest(c, errPrefix, "fetching notifications", notifications.Err())
+		}
+
+		s.streamNotifications(ctx, watchCtx, stopWatching, id, notifications, resumeAfterSeqNo)
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) StreamTestWorkflowExecutionNotificationsWebSocketHandler() fiber.Handler {
+	return websocket.New(func(c *websocket.Conn) {
+		ctx, ctxCancel := context.WithCancel(context.Background())
+		id := c.Params("executionID")
+
+		// Stop reading when the WebSocket connection is already closed
+		originalClose := c.CloseHandler()
+		c.SetCloseHandler(func(code int, text string) error {
+			ctxCancel()
+			return originalClose(code, text)
+		})
+		defer c.Close()
+
+		// Fetch execution from database
+		execution, err := s.TestWorkflowResults.Get(ctx, id)
+		if err != nil {
+			return
+		}
+
+		// Check for the logs
+		notifications := s.ExecutionWorkerClient.Notifications(ctx, execution.Id, executionworkertypes.NotificationsOptions{
+			Hints: executionworkertypes.Hints{
+				Namespace:   execution.Namespace,
+				Signature:   execution.Signature,
+				ScheduledAt: common.Ptr(execution.ScheduledAt),
+			},
+		})
+		if notifications.Err() != nil {
+			return
+		}
+
+		for n := range notifications.Channel() {
+			_ = c.WriteJSON(n)
+		}
+	})
+}
+
+func (s *TestkubeAPI) StreamTestWorkflowExecutionServiceNotificationsWebSocketHandler() fiber.Handler {
+	return websocket.New(func(c *websocket.Conn) {
+		ctx, ctxCancel := context.WithCancel(context.Background())
+		executionID := c.Params("executionID")
+		serviceName := c.Params("serviceName")
+		serviceIndex := c.Params("serviceIndex")
+
+		// Stop reading when the WebSocket connection is already closed
+		originalClose := c.CloseHandler()
+		c.SetCloseHandler(func(code int, text string) error {
+			ctxCancel()
+			return originalClose(code, text)
+		})
+		defer c.Close()
+
+		// Fetch execution from database
+		execution, err := s.TestWorkflowResults.Get(ctx, executionID)
+		if err != nil {
+			return
+		}
+
+		found := false
+		if execution.Workflow != nil && execution.Workflow.Spec != nil {
+			found = execution.Workflow.HasService(serviceName)
+		}
+
+		if !found {
+			return
+		}
+
+		// Check for the logs
+		id := fmt.Sprintf("%s-%s-%s", execution.Id, serviceName, serviceIndex)
+		notifications := s.ExecutionWorkerClient.Notifications(ctx, id, executionworkertypes.NotificationsOptions{
+			Hints: executionworkertypes.Hints{
+				Namespace:   execution.Namespace,
+				ScheduledAt: common.Ptr(execution.ScheduledAt),
+			},
+		})
+		if notifications.Err() != nil {
+			return
+		}
+
+		for n := range notifications.Channel() {
+			_ = c.WriteJSON(n)
+		}
+	})
+}
+
+func (s *TestkubeAPI) StreamTestWorkflowExecutionParallelStepNotificationsWebSocketHandler() fiber.Handler {
+	return websocket.New(func(c *websocket.Conn) {
+		ctx, ctxCancel := context.WithCancel(context.Background())
+		executionID := c.Params("executionID")
+		ref := c.Params("ref")
+		workerIndex := c.Params("workerIndex")
+
+		// Stop reading when the WebSocket connection is already closed
+		originalClose := c.CloseHandler()
+		c.SetCloseHandler(func(code int, text string) error {
+			ctxCancel()
+			return originalClose(code, text)
+		})
+		defer c.Close()
+
+		// Fetch execution from database
+		execution, err := s.TestWorkflowResults.Get(ctx, executionID)
+		if err != nil {
+			return
+		}
+
+		reference := execution.GetParallelStepReference(ref)
+		if reference == "" {
+			return
+		}
+
+		// Check for the logs
+		id := fmt.Sprintf("%s-%s-%s", execution.Id, reference, workerIndex)
+		notifications := s.ExecutionWorkerClient.Notifications(ctx, id, executionworkertypes.NotificationsOptions{
+			Hints: executionworkertypes.Hints{
+				Namespace:   execution.Namespace,
+				ScheduledAt: common.Ptr(execution.ScheduledAt),
+			},
+		})
+		if notifications.Err() != nil {
+			return
+		}
+
+		for n := range notifications.Channel() {
+			_ = c.WriteJSON(n)
+		}
+	})
+}
+
+func (s *TestkubeAPI) ListTestWorkflowExecutionsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		errPrefix := "failed to list test workflow executions"
+
+		filter := getWorkflowExecutionsFilterFromRequest(c)
+
+		executions, err := s.TestWorkflowResults.GetExecutionsSummary(c.Context(), filter)
+		if err != nil {
+			return s.ClientError(c, errPrefix+": get execution results", err)
+		}
+
+		executionTotals, err := s.TestWorkflowResults.GetExecutionsTotals(c.Context(), testworkflow2.NewExecutionsFilter().WithName(filter.Name()))
+		if err != nil {
+			return s.ClientError(c, errPrefix+": get totals", err)
+		}
+
+		filterTotals := *filter.(*testworkflow2.FilterImpl)
+		filterTotals.WithPage(0).WithPageSize(math.MaxInt32)
+		filteredTotals, err := s.TestWorkflowResults.GetExecutionsTotals(c.Context(), filterTotals)
+		if err != nil {
+			return s.ClientError(c, errPrefix+": get filtered totals", err)
+		}
+
+		results := testkube.TestWorkflowExecutionsResult{
+			Totals:   &executionTotals,
+			Filtered: &filteredTotals,
+			Results:  executions,
+		}
+		return c.JSON(results)
+	}
+}
+
+func (s *TestkubeAPI) GetTestWorkflowMetricsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		workflowName := c.Params("id")
+
+		const DefaultLimit = 0
+		limit, err := strconv.Atoi(c.Query("limit", strconv.Itoa(DefaultLimit)))
+		if err != nil {
+			limit = DefaultLimit
+		}
+
+		const DefaultLastDays = 7
+		last, err := strconv.Atoi(c.Query("last", strconv.Itoa(DefaultLastDays)))
+		if err != nil {
+			last = DefaultLastDays
+		}
+
+		metrics, err := s.TestWorkflowResults.GetTestWorkflowMetrics(c.Context(), workflowName, limit, last)
+		if err != nil {
+			return s.ClientError(c, "get metrics for workflow", err)
+		}
+
+		return c.JSON(metrics)
+	}
+}
+
+func (s *TestkubeAPI) GetTestWorkflowExecutionHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		id := c.Params("id", "")
+		executionID := c.Params("executionID")
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if id == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, id)
+		}
+		if err != nil {
+			return s.ClientError(c, "get execution", err)
+		}
+
+		return c.JSON(execution)
+	}
+}
+
+func (s *TestkubeAPI) GetTestWorkflowExecutionLogsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		id := c.Params("id", "")
+		executionID := c.Params("executionID")
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if id == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, id)
+		}
+		if err != nil {
+			return s.ClientError(c, "get execution", err)
+		}
+
+		rc, err := s.TestWorkflowOutput.ReadLog(ctx, executionID, execution.Workflow.Name)
+		if err != nil {
+			return s.InternalError(c, "can't get log", executionID, err)
+		}
+		defer rc.Close()
+
+		c.Context().SetContentType(mediaTypePlainText)
+		_, err = io.Copy(c.Response().BodyWriter(), rc)
+		return err
+	}
+}
+
+func (s *TestkubeAPI) AbortTestWorkflowExecutionHandler() fiber.Handler {
+	if !s.isStandalone {
+		return s.abortTestWorkflowExecutionHandlerPro() //nolint
+	}
+	return s.AbortTestWorkflowExecutionHandlerStandalone()
+}
+
+// Deprecated: remove me once commercial control plane is source of truth.
+func (s *TestkubeAPI) abortTestWorkflowExecutionHandlerPro() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to abort test workflow execution '%s'", executionID)
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if name == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, name)
+		}
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		if execution.Result != nil && execution.Result.IsFinished() {
+			return s.BadRequest(c, errPrefix, "checking execution", errors.New("execution already finished"))
+		}
+
+		// Abort the Test Workflow
+		err = s.ExecutionWorkerClient.Abort(ctx, execution.Id, executionworkertypes.DestroyOptions{
+			Namespace: execution.Namespace,
+			Actor:     testkube.StopActorAPI,
+		})
+		if err != nil {
+			return s.ClientError(c, "aborting test workflow execution", err)
+		}
+		s.Metrics.IncAbortTestWorkflow()
+
+		c.Status(http.StatusNoContent)
+
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) AbortTestWorkflowExecutionHandlerStandalone() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to abort test workflow execution '%s'", executionID)
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if name == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, name)
+		}
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		if execution.Result != nil && execution.Result.IsFinished() {
+			return s.BadRequest(c, errPrefix, "checking execution", errors.New("execution already finished"))
+		}
+
+		// Abort the Test Workflow
+		err = s.executionController.AbortExecution(ctx, execution.Id)
+		if err != nil {
+			return s.ClientError(c, "aborting test workflow execution", err)
+		}
+		s.Metrics.IncAbortTestWorkflow()
+
+		c.Status(http.StatusNoContent)
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) PauseTestWorkflowExecutionHandler() fiber.Handler {
+	if !s.isStandalone {
+		return s.pauseTestWorkflowExecutionHandlerPro() //nolint
+	}
+	return s.pauseTestWorkflowExecutionHandlerStandalone()
+}
+
+// Deprecated: remove me once commercial control plane is source of truth.
+
+func (s *TestkubeAPI) pauseTestWorkflowExecutionHandlerPro() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to abort test workflow execution '%s'", executionID)
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if name == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, name)
+		}
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		if execution.Result != nil && execution.Result.IsFinished() {
+			return s.BadRequest(c, errPrefix, "checking execution", errors.New("execution already finished"))
+		}
+
+		// Pausing the execution
+		err = s.ExecutionWorkerClient.Pause(ctx, execution.Id, executionworkertypes.ControlOptions{
+			Namespace: execution.Namespace,
+		})
+		if err != nil {
+			return s.ClientError(c, "pausing test workflow execution", err)
+		}
+
+		c.Status(http.StatusNoContent)
+
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) pauseTestWorkflowExecutionHandlerStandalone() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to abort test workflow execution '%s'", executionID)
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if name == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, name)
+		}
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		if execution.Result != nil && execution.Result.IsFinished() {
+			return s.BadRequest(c, errPrefix, "checking execution", errors.New("execution already finished"))
+		}
+
+		// Pausing the execution
+		err = s.executionController.PauseExecution(ctx, execution.Id)
+		if err != nil {
+			return s.ClientError(c, "pausing test workflow execution", err)
+		}
+
+		c.Status(http.StatusNoContent)
+
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) ResumeTestWorkflowExecutionHandler() fiber.Handler {
+	if !s.isStandalone {
+		return s.resumeTestWorkflowExecutionHandlerPro()
+	}
+	return s.resumeTestWorkflowExecutionHandlerStandalone()
+}
+
+func (s *TestkubeAPI) resumeTestWorkflowExecutionHandlerPro() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to abort test workflow execution '%s'", executionID)
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if name == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, name)
+		}
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		if execution.Result != nil && execution.Result.IsFinished() {
+			return s.BadRequest(c, errPrefix, "checking execution", errors.New("execution already finished"))
+		}
+
+		// Resuming the execution
+		err = s.ExecutionWorkerClient.Resume(ctx, execution.Id, executionworkertypes.ControlOptions{
+			Namespace: execution.Namespace,
+		})
+		if err != nil {
+			return s.ClientError(c, "resuming test workflow execution", err)
+		}
+
+		c.Status(http.StatusNoContent)
+
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) resumeTestWorkflowExecutionHandlerStandalone() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to abort test workflow execution '%s'", executionID)
+
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if name == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, name)
+		}
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		if execution.Result != nil && execution.Result.IsFinished() {
+			return s.BadRequest(c, errPrefix, "checking execution", errors.New("execution already finished"))
+		}
+
+		// Resuming the execution
+		err = s.executionController.ResumeExecution(ctx, execution.Id)
+		if err != nil {
+			return s.ClientError(c, "resuming test workflow execution", err)
+		}
+
+		c.Status(http.StatusNoContent)
+
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) AbortAllTestWorkflowExecutionsHandler() fiber.Handler {
+	if !s.isStandalone {
+		return s.abortAllTestWorkflowExecutionsHandlerPro()
+	}
+	return s.abortAllTestWorkflowExecutionsHandlerStandalone()
+}
+
+// Deprecated: remove me once commercial control plane is source of truth.
+func (s *TestkubeAPI) abortAllTestWorkflowExecutionsHandlerPro() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		errPrefix := fmt.Sprintf("failed to abort test workflow executions '%s'", name)
+
+		// Fetch executions
+		filter := testworkflow2.NewExecutionsFilter().WithName(name).WithStatus(string(testkube.RUNNING_TestWorkflowStatus))
+		executions, err := s.TestWorkflowResults.GetExecutions(ctx, filter)
+		if err != nil {
+			if apiutils.IsNotFound(err) {
+				c.Status(http.StatusNoContent)
+				return nil
+			}
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		for _, execution := range executions {
+			err = s.ExecutionWorkerClient.Abort(ctx, execution.Id, executionworkertypes.DestroyOptions{
+				Namespace: execution.Namespace,
+				Actor:     testkube.StopActorAPI,
+				Reason:    testkube.StopReasonAbortAll,
+			})
+			if err != nil {
+				return s.ClientError(c, errPrefix, err)
+			}
+			s.Metrics.IncAbortTestWorkflow()
+		}
+
+		c.Status(http.StatusNoContent)
+
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) abortAllTestWorkflowExecutionsHandlerStandalone() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		errPrefix := fmt.Sprintf("failed to abort test workflow executions '%s'", name)
+
+		// Fetch executions
+		filter := testworkflow2.NewExecutionsFilter().WithName(name)
+		filter.FStatuses = testkube.TestWorkflowExecutingStatus
+		executions, err := s.TestWorkflowResults.GetExecutions(ctx, filter)
+		if err != nil {
+			if apiutils.IsNotFound(err) {
+				c.Status(http.StatusNoContent)
+				return nil
+			}
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		for _, execution := range executions {
+			err = s.executionController.AbortExecution(ctx, execution.Id)
+			if err != nil {
+				return s.ClientError(c, errPrefix, err)
+			}
+			s.Metrics.IncAbortTestWorkflow()
+		}
+
+		c.Status(http.StatusNoContent)
+
+		return nil
+	}
+}
+
+func (s *TestkubeAPI) ListTestWorkflowExecutionArtifactsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to list artifacts for test workflow execution %s", executionID)
+
+		execution, err := s.TestWorkflowResults.Get(c.Context(), executionID)
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		files, err := s.ArtifactsStorage.ListFiles(c.Context(), execution.Id, "", "", execution.Workflow.Name)
+		if err != nil {
+			return s.InternalError(c, errPrefix, "storage client could not list test workflow files", err)
+		}
+
+		return c.JSON(files)
+	}
+}
+
+func (s *TestkubeAPI) GetTestWorkflowArtifactHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		executionID := c.Params("executionID")
+		fileName := c.Params("filename")
+		errPrefix := fmt.Sprintf("failed to get artifact %s for workflow execution %s", fileName, executionID)
+
+		// TODO fix this someday :) we don't know 15 mins before release why it's working this way
+		// remember about CLI client and Dashboard client too!
+		unescaped, err := url.QueryUnescape(fileName)
+		if err == nil {
+			fileName = unescaped
+		}
+		unescaped, err = url.QueryUnescape(fileName)
+		if err == nil {
+			fileName = unescaped
+		}
+		//// quickfix end
+
+		execution, err := s.TestWorkflowResults.Get(c.Context(), executionID)
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		file, err := s.ArtifactsStorage.DownloadFile(c.Context(), fileName, execution.Id, "", "", execution.Workflow.Name)
+		if err != nil {
+			return s.InternalError(c, errPrefix, "could not download file", err)
+		}
+
+		return c.SendStream(file)
+	}
+}
+
+func (s *TestkubeAPI) GetTestWorkflowArtifactArchiveHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		executionID := c.Params("executionID")
+		query := c.Request().URI().QueryString()
+		errPrefix := fmt.Sprintf("failed to get artifact archive for test workflow execution %s", executionID)
+
+		values, err := url.ParseQuery(string(query))
+		if err != nil {
+			return s.BadRequest(c, errPrefix, "could not parse query string", err)
+		}
+
+		execution, err := s.TestWorkflowResults.Get(c.Context(), executionID)
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		archive, err := s.ArtifactsStorage.DownloadArchive(c.Context(), execution.Id, "", "", execution.Workflow.Name, values["mask"])
+		if err != nil {
+			return s.InternalError(c, errPrefix, "could not download workflow artifact archive", err)
+		}
+
+		return c.SendStream(archive)
+	}
+}
+
+func (s *TestkubeAPI) UpdateTestWorkflowExecutionTagsHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := c.Context()
+		name := c.Params("id")
+		executionID := c.Params("executionID")
+		errPrefix := fmt.Sprintf("failed to update tags for test workflow execution '%s'", executionID)
+
+		var tags map[string]string
+		if body := c.Body(); len(body) > 0 {
+			if err := json.Unmarshal(body, &tags); err != nil {
+				return s.BadRequest(c, errPrefix, "invalid request body", err)
+			}
+		}
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+
+		// Verify execution exists (and belongs to the workflow if scoped),
+		// and resolve the actual execution ID for the update.
+		var execution testkube.TestWorkflowExecution
+		var err error
+		if name == "" {
+			execution, err = s.TestWorkflowResults.Get(ctx, executionID)
+		} else {
+			execution, err = s.TestWorkflowResults.GetByNameAndTestWorkflow(ctx, executionID, name)
+		}
+		if err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		if err := s.TestWorkflowResults.UpdateTags(ctx, execution.Id, tags); err != nil {
+			return s.ClientError(c, errPrefix, err)
+		}
+
+		c.Status(http.StatusNoContent)
+		return nil
+	}
+}
+
+func getWorkflowExecutionsFilterFromRequest(c *fiber.Ctx) testworkflow2.Filter {
+	filter := testworkflow2.NewExecutionsFilter()
+	name := c.Params("id", "")
+	if name != "" {
+		filter = filter.WithName(name)
+	}
+
+	textSearch := c.Query("textSearch", "")
+	if textSearch != "" {
+		filter = filter.WithTextSearch(textSearch)
+	}
+
+	page, err := strconv.Atoi(c.Query("page", ""))
+	if err == nil {
+		filter = filter.WithPage(page)
+	}
+
+	pageSize, err := strconv.Atoi(c.Query("pageSize", ""))
+	if err == nil && pageSize != 0 {
+		filter = filter.WithPageSize(pageSize)
+	}
+
+	status := c.Query("status", "")
+	if status != "" {
+		filter = filter.WithStatus(status)
+	}
+
+	statusDetailsType := c.Query("statusDetailsType", "")
+	if statusDetailsType != "" {
+		filter = filter.WithStatusDetailsTypes(statusDetailsType)
+	}
+
+	last, err := strconv.Atoi(c.Query("last", "0"))
+	if err == nil && last != 0 {
+		filter = filter.WithLastNDays(last)
+	}
+
+	dFilter := datefilter.NewDateFilter(c.Query("startDate", ""), c.Query("endDate", ""))
+	if dFilter.IsStartValid {
+		filter = filter.WithStartDate(dFilter.Start)
+	}
+
+	if dFilter.IsEndValid {
+		filter = filter.WithEndDate(dFilter.End)
+	}
+
+	selector := c.Query("selector")
+	if selector != "" {
+		filter = filter.WithSelector(selector)
+	}
+
+	tagSelector := c.Query("tagSelector")
+	if tagSelector != "" {
+		filter = filter.WithTagSelector(tagSelector)
+	}
+
+	actorName := c.Query("actorName")
+	if actorName != "" {
+		filter = filter.WithActorName(actorName)
+	}
+
+	actorType := c.Query("actorType")
+	if actorType != "" {
+		filter = filter.WithActorType(testkube.TestWorkflowRunningContextActorType(actorType))
+	}
+
+	// A value that is not a positive number is ignored, like the other numeric filters here.
+	if minDurationMs, err := strconv.ParseInt(c.Query("minDurationMs", ""), 10, 64); err == nil && minDurationMs > 0 {
+		filter = filter.WithMinDurationMs(minDurationMs)
+	}
+	if maxDurationMs, err := strconv.ParseInt(c.Query("maxDurationMs", ""), 10, 64); err == nil && maxDurationMs > 0 {
+		filter = filter.WithMaxDurationMs(maxDurationMs)
+	}
+
+	return filter
+}

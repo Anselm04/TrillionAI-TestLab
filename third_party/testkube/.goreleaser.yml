@@ -1,0 +1,109 @@
+version: 2
+builds:
+  - builder: prebuilt
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goamd64:
+      - v1
+    prebuilt:
+      path: "{{ .Os }}/testkube_{{ .Os }}_{{ .Arch }}{{ with .Amd64 }}_{{ . }}{{ end }}{{ with .Arm64 }}_{{ . }}{{ end }}/kubectl-testkube{{ .Ext }}"
+    binary: kubectl-testkube
+source:
+  enabled: false
+archives:
+  - id: testkube
+    name_template: >-
+      {{ .ProjectName }}_{{.Version}}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+checksum:
+  name_template: "checksums.txt"
+
+# Keyless cosign signature of checksums.txt, which covers every release
+# artifact. Needs cosign and the id-token: write permission in the job.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --bundle=${signature}
+      - --yes
+      - ${artifact}
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^test:'
+      - '^chore'
+      - 'merge conflict'
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+      - go mod tidy
+  groups:
+    - title: Dependency updates
+      regexp: '^.*?(feat|fix)\(deps\)!?:.+$'
+      order: 300
+    - title: 'New Features'
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 100
+    - title: 'Security updates'
+      regexp: '^.*?sec(\([[:word:]]+\))??!?:.+$'
+      order: 150
+    - title: 'Bug fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 200
+    - title: 'Documentation updates'
+      regexp: ^.*?doc(\([[:word:]]+\))??!?:.+$
+      order: 400
+    - title: 'Build process updates'
+      regexp: ^.*?build(\([[:word:]]+\))??!?:.+$
+      order: 400
+    - title: Other work
+      order: 9999
+
+release:
+  # Tags that have the format v1.0.0-rc1 will mark the release as a pre-release (i.e. not ready for production)
+  # Other tags will be marked as ready for production
+  prerelease: auto
+
+brews:
+  - repository:
+      owner: kubeshop
+      name: homebrew-testkube
+    description: Testkube - your somewhat opinionated and friendly Kubernetes testing framework!
+    homepage: https://testkube.io
+    license: "MIT"
+    dependencies:
+      - name: helm
+      - name: kubectl
+    install: |
+      bin.install "kubectl-testkube"
+      ln_s bin/"kubectl-testkube", bin/"tk"
+      ln_s bin/"kubectl-testkube", bin/"testkube"
+
+nfpms:
+  - maintainer: Testkube team
+    license: "MIT"
+    formats:
+      - deb
+    description: Testkube - your somewhat opinionated and friendly Kubernetes testing framework!
+    contents:
+      - src: /usr/bin/kubectl-testkube
+        dst: /usr/bin/tk
+        type: "symlink"
+      - src: /usr/bin/kubectl-testkube
+        dst: /usr/bin/testkube
+        type: "symlink"

@@ -1,0 +1,566 @@
+package v1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	commonv1 "github.com/kubeshop/testkube/api/common/v1"
+	testsv3 "github.com/kubeshop/testkube/api/tests/v3"
+)
+
+type RetryPolicy struct {
+	// how many times at most it should retry
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	Count int32 `json:"count,omitempty"`
+
+	// until when it should retry (defaults to: "passed")
+	Until string `json:"until,omitempty" expr:"expression"`
+}
+
+type StepMeta struct {
+	// stable identifier for referencing this step in expressions (e.g., step.<id>.outputs)
+	// if not provided, auto-derived from name by lowercasing and replacing non-alphanumeric characters with underscores
+	// must contain only lowercase alphanumeric characters and underscores
+	Id string `json:"id,omitempty"`
+
+	// readable name for the step
+	Name string `json:"name,omitempty" expr:"template"`
+
+	// expression to declare under which conditions the step should be run
+	// defaults to: "passed", except artifacts where it defaults to "always"
+	Condition string `json:"condition,omitempty" expr:"expression"`
+
+	// mark the step as pure, applying optimizations to merge the containers together
+	Pure *bool `json:"pure,omitempty"`
+}
+
+type StepSource struct {
+	// content that should be fetched for this step
+	Content *Content `json:"content,omitempty" expr:"include"`
+}
+
+type StepDefaults struct {
+	// defaults for the containers in this step
+	Container *ContainerConfig `json:"container,omitempty" expr:"include"`
+
+	// working directory to use for this step
+	WorkingDir *string `json:"workingDir,omitempty" expr:"template"`
+}
+
+type StepControl struct {
+	// is the step expected to fail
+	Negative bool `json:"negative,omitempty"`
+
+	// is the step optional, so its failure won't affect the TestWorkflow result
+	Optional bool `json:"optional,omitempty"`
+
+	// pause the step initially
+	Paused bool `json:"paused,omitempty" expr:"ignore"`
+
+	// policy for retrying the step
+	Retry *RetryPolicy `json:"retry,omitempty" expr:"include"`
+
+	// maximum time this step may take
+	Timeout string `json:"timeout,omitempty" expr:"template"`
+}
+
+type StepOperations struct {
+	// delay before the step
+	// +kubebuilder:validation:Pattern=^((0|[1-9][0-9]*)h)?((0|[1-9][0-9]*)m)?((0|[1-9][0-9]*)s)?((0|[1-9][0-9]*)ms)?$
+	Delay string `json:"delay,omitempty"`
+
+	// script to run in a default shell for the container
+	Shell string `json:"shell,omitempty" expr:"template"`
+
+	// run specific container in the current step
+	Run *StepRun `json:"run,omitempty" expr:"include"`
+
+	// execute other Testkube resources
+	Execute *StepExecute `json:"execute,omitempty" expr:"include"`
+
+	// scrape artifacts from the volumes
+	Artifacts *StepArtifacts `json:"artifacts,omitempty" expr:"include"`
+
+	// dependency cache to restore before and save after this step's operations
+	Cache *StepCache `json:"cache,omitempty" expr:"include"`
+}
+
+type IndependentStep struct {
+	StepMeta    `json:",inline" expr:"include"`
+	StepControl `json:",inline" expr:"include"`
+	StepSource  `json:",inline" expr:"include"`
+
+	// list of accompanying services to start
+	Services map[string]IndependentServiceSpec `json:"services,omitempty" expr:"template,include"`
+
+	StepDefaults `json:",inline" expr:"include"`
+
+	// steps to run before other operations in this step
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Setup []IndependentStep `json:"setup,omitempty" expr:"include"`
+
+	StepOperations `json:",inline" expr:"include"`
+
+	// instructions for parallel execution
+	Parallel *IndependentStepParallel `json:"parallel,omitempty" expr:"include"`
+
+	// sub-steps to run
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Steps []IndependentStep `json:"steps,omitempty" expr:"include"`
+}
+
+type Step struct {
+	StepMeta    `json:",inline" expr:"include"`
+	StepControl `json:",inline" expr:"include"`
+
+	// multiple templates to include in this step
+	Use []TemplateRef `json:"use,omitempty" expr:"include"`
+
+	StepSource `json:",inline" expr:"include"`
+
+	// list of accompanying services to start
+	Services map[string]ServiceSpec `json:"services,omitempty" expr:"template,include"`
+
+	StepDefaults `json:",inline" expr:"include"`
+
+	// steps to run before other operations in this step
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Setup []Step `json:"setup,omitempty" expr:"include"`
+
+	StepOperations `json:",inline" expr:"include"`
+
+	// single template to run in this step
+	Template *TemplateRef `json:"template,omitempty" expr:"include"`
+
+	// instructions for parallel execution
+	Parallel *StepParallel `json:"parallel,omitempty" expr:"include"`
+
+	// sub-steps to run
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Steps []Step `json:"steps,omitempty" expr:"include"`
+}
+
+type StepRun struct {
+	ContainerConfig `json:",inline" expr:"include"`
+
+	// script to run in a default shell for the container
+	Shell *string `json:"shell,omitempty" expr:"template"`
+}
+
+type StepExecute struct {
+	// how many resources could be scheduled in parallel
+	Parallelism int32 `json:"parallelism,omitempty"`
+
+	// only schedule the resources, don't watch the results (unless it is needed for parallelism)
+	Async bool `json:"async,omitempty"`
+
+	// tests to run
+	Tests []StepExecuteTest `json:"tests,omitempty" expr:"include"`
+
+	// workflows to run
+	Workflows []StepExecuteWorkflow `json:"workflows,omitempty" expr:"include"`
+}
+
+type TarballRequest struct {
+	// path to load the files from
+	From string `json:"from,omitempty" expr:"template"`
+
+	// file patterns to pack
+	Files *DynamicList `json:"files,omitempty" expr:"template"`
+}
+
+type StepExecuteStrategy struct {
+	// matrix of parameters to spawn instances (static)
+	Matrix map[string]DynamicList `json:"matrix,omitempty" expr:"force"`
+
+	// static number of sharded instances to spawn
+	Count *ConfigValue `json:"count,omitempty" expr:"expression"`
+
+	// dynamic number of sharded instances to spawn - it will be lowered if there is not enough sharded values
+	MaxCount *ConfigValue `json:"maxCount,omitempty" expr:"expression"`
+
+	// parameters that should be distributed across sharded instances
+	Shards map[string]DynamicList `json:"shards,omitempty" expr:"force"`
+}
+
+type StepExecuteTest struct {
+	// test name to run
+	Name string `json:"name,omitempty" expr:"template"`
+
+	// test execution description to display
+	Description string `json:"description,omitempty" expr:"template"`
+
+	StepExecuteStrategy `json:",inline" expr:"include"`
+
+	// pack some data from the original file system to serve them down
+	Tarball map[string]TarballRequest `json:"tarball,omitempty" expr:"template,include"`
+
+	// pass the execution request overrides
+	ExecutionRequest *TestExecutionRequest `json:"executionRequest,omitempty" expr:"include"`
+}
+
+type StepExecuteWorkflow struct {
+	// workflow name to run
+	Name string `json:"name,omitempty" expr:"template"`
+
+	// selector is used to identify a group of test workflows based on their metadata labels
+	Selector *metav1.LabelSelector `json:"selector,omitempty" expr:"include"`
+
+	// name to reference this execution by in the execution() expression, defaults to the workflow name
+	As string `json:"as,omitempty" expr:"template"`
+
+	// test workflow execution description to display
+	Description string `json:"description,omitempty" expr:"template"`
+
+	StepExecuteStrategy `json:",inline" expr:"include"`
+
+	// unique execution name to use
+	ExecutionName string `json:"executionName,omitempty" expr:"template"`
+
+	// pack some data from the original file system to serve them down
+	Tarball map[string]TarballRequest `json:"tarball,omitempty" expr:"template,include"`
+
+	// configuration to pass for the workflow
+	Config map[string]ConfigValue `json:"config,omitempty" expr:"template"`
+
+	// instructions for downloading artifacts produced by executed test workflows
+	Fetch []StepExecuteFetch `json:"fetch,omitempty" expr:"include"`
+
+	// id of the execution to record this one as a rerun of, so that it resolves
+	// execution("rerun"). Runs the current definition, not the base's snapshot.
+	// The base must be one the scheduling execution may itself read.
+	BaseExecutionId string `json:"baseExecutionId,omitempty" expr:"template"`
+	// NOTE: keep the description above short. It is copied into the generated CRDs
+	// once per level of step nesting, and those are already trimmed to fit the
+	// last-applied annotation limit. The full explanation belongs in the docs and
+	// in execute.ExecuteTestWorkflow.
+
+	// Targets helps decide on which runner the execution is scheduled.
+	Target *commonv1.Target `json:"target,omitempty" expr:"include"`
+}
+
+// StepExecuteFetch downloads artifacts produced by an executed test workflow.
+type StepExecuteFetch struct {
+	// execution to download the artifacts from, defaults to the one being executed
+	From string `json:"from,omitempty" expr:"template"`
+
+	// artifact paths to download, relative to the artifact root of the execution
+	Paths []string `json:"paths,omitempty" expr:"template"`
+
+	// directory to download the artifacts to; when the entry fans out over a matrix or
+	// shards, include {{ index }} to keep each instance's artifacts apart
+	To string `json:"to" expr:"template"`
+}
+
+type StepParallel struct {
+	// how many resources could be scheduled in parallel
+	Parallelism *ConfigValue `json:"parallelism,omitempty" expr:"expression"`
+
+	// abort remaining parallel workers on first failure
+	FailFast bool `json:"failFast,omitempty"`
+
+	StepExecuteStrategy `json:",inline" expr:"include"`
+
+	// worker description to display
+	Description string `json:"description,omitempty" expr:"template"`
+
+	// should save logs for the parallel step (true if not specified)
+	Logs *string `json:"logs,omitempty" expr:"expression"`
+
+	// instructions for transferring files
+	Transfer []StepParallelTransfer `json:"transfer,omitempty" expr:"include"`
+
+	// instructions for fetching files back
+	Fetch []StepParallelFetch `json:"fetch,omitempty" expr:"include"`
+
+	StepControl    `json:",inline" expr:"include"`
+	StepOperations `json:",inline" expr:"include"`
+
+	// single template to run in this step
+	Template *TemplateRef `json:"template,omitempty" expr:"include"`
+
+	// templates to include at a top-level of workflow
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Use []TemplateRef `json:"use,omitempty" expr:"include"`
+
+	// events triggering execution of the test workflow
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Events []Event `json:"events,omitempty" expr:"include"`
+
+	// system configuration to define the orchestration behavior
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	System *TestWorkflowSystem `json:"system,omitempty" expr:"include"`
+
+	// make the instance configurable with some input data for scheduling it
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Config map[string]ParameterSchema `json:"config,omitempty" expr:"include"`
+
+	// global content that should be fetched into all containers
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Content *Content `json:"content,omitempty" expr:"include"`
+
+	// defaults for the containers for all the TestWorkflow steps
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Container *ContainerConfig `json:"container,omitempty" expr:"include"`
+
+	// configuration for the scheduled job
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Job *JobConfig `json:"job,omitempty" expr:"include"`
+
+	// configuration for the scheduled pod
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Pod *PodConfig `json:"pod,omitempty" expr:"include"`
+
+	// configuration for notifications
+	// Deprecated: field is not used
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Notifications *NotificationsConfig `json:"notifications,omitempty" expr:"include"`
+
+	// values to be used for test workflow execution
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Execution *TestWorkflowExecutionSchema `json:"execution,omitempty" expr:"include"`
+
+	// per-workflow timeout configuration
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Timeouts *TestWorkflowTimeouts `json:"timeouts,omitempty" expr:"include"`
+
+	// list of accompanying services to start
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Services map[string]ServiceSpec `json:"services,omitempty" expr:"template,include"`
+
+	// steps for setting up the workflow
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Setup []Step `json:"setup,omitempty" expr:"include"`
+
+	// steps to execute in the workflow
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Steps []Step `json:"steps,omitempty" expr:"include"`
+
+	// steps to run at the end of the workflow
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	After []Step `json:"after,omitempty" expr:"include"`
+
+	// list of accompanying permanent volume claims
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Pvcs map[string]corev1.PersistentVolumeClaimSpec `json:"pvcs,omitempty" expr:"template,include"`
+}
+
+func (sp StepParallel) NewTestWorkflowSpec() *TestWorkflowSpec {
+	return &TestWorkflowSpec{
+		Use: sp.Use,
+		TestWorkflowSpecBase: TestWorkflowSpecBase{
+			Events:        sp.Events,
+			System:        sp.System,
+			Config:        sp.Config,
+			Content:       sp.Content,
+			Container:     sp.Container,
+			Job:           sp.Job,
+			Pod:           sp.Pod,
+			Notifications: sp.Notifications,
+			Execution:     sp.Execution,
+			Timeouts:      sp.Timeouts,
+		},
+		Services: sp.Services,
+		Setup:    sp.Setup,
+		Steps:    sp.Steps,
+		After:    sp.After,
+		Pvcs:     sp.Pvcs,
+	}
+}
+
+type IndependentStepParallel struct {
+	// how many resources could be scheduled in parallel
+	Parallelism *ConfigValue `json:"parallelism,omitempty" expr:"expression"`
+
+	// abort remaining parallel workers on first failure
+	FailFast bool `json:"failFast,omitempty"`
+
+	StepExecuteStrategy `json:",inline" expr:"include"`
+
+	// worker description to display
+	Description string `json:"description,omitempty" expr:"template"`
+
+	// should save logs for the parallel step (true if not specified)
+	Logs *string `json:"logs,omitempty" expr:"expression"`
+
+	// instructions for transferring files
+	Transfer []StepParallelTransfer `json:"transfer,omitempty" expr:"include"`
+
+	// instructions for fetching files back
+	Fetch []StepParallelFetch `json:"fetch,omitempty" expr:"include"`
+
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	TestWorkflowTemplateSpec `json:",inline" expr:"include"`
+
+	StepControl    `json:",inline" expr:"include"`
+	StepOperations `json:",inline" expr:"include"`
+}
+
+type StepParallelTransfer struct {
+	// path to load the files from
+	From string `json:"from" expr:"template"`
+
+	// file patterns to pack
+	Files *DynamicList `json:"files,omitempty" expr:"template"`
+
+	// path where the tarball should be extracted
+	To string `json:"to,omitempty" expr:"template"`
+
+	// should it mount a new volume there
+	Mount *bool `json:"mount,omitempty" expr:"ignore"`
+}
+
+type StepParallelFetch struct {
+	// path to load the files from
+	From string `json:"from" expr:"template"`
+
+	// file patterns to pack
+	Files *DynamicList `json:"files,omitempty" expr:"template"`
+
+	// path where the tarball should be extracted
+	To string `json:"to,omitempty" expr:"template"`
+}
+
+type StepArtifacts struct {
+	// working directory to override, so it will be used as a base dir
+	WorkingDir *string `json:"workingDir,omitempty" expr:"template"`
+	// compression options for the artifacts
+	Compress *ArtifactCompression `json:"compress,omitempty" expr:"include"`
+	// paths to fetch from the container
+	Paths []string `json:"paths,omitempty" expr:"template"`
+}
+
+type ArtifactCompression struct {
+	// artifact name
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name" expr:"template"`
+}
+
+// CacheScope declares how widely a cache entry is shared.
+type CacheScope string
+
+const (
+	// CacheScopeWorkflow shares an entry only with other executions of the same workflow.
+	CacheScopeWorkflow CacheScope = "workflow"
+	// CacheScopeEnvironment shares an entry with every workflow in the environment.
+	// Any workflow that may write such an entry can influence what every other
+	// workflow restores, so this widens a trust boundary, not just a cache.
+	CacheScopeEnvironment CacheScope = "environment"
+)
+
+// StepCache restores directories from object storage before the step's operations run
+// and saves them back once the step has passed, so that dependency installs survive
+// between executions.
+//
+// A cache is only ever an optimization: a miss, a corrupt entry, storage that cannot be
+// reached, or a control plane too old to serve caches all degrade the step to an
+// uncached run rather than failing it.
+type StepCache struct {
+	// key to store the entry under, usually derived from a lockfile,
+	// e.g. 'npm-{{ hash_files("package-lock.json") }}'
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Key string `json:"key" expr:"template"`
+
+	// key prefixes to fall back to when there is no entry for the exact key,
+	// tried in order, where the most recently saved match wins
+	// +kubebuilder:validation:MaxItems=10
+	RestoreKeys []string `json:"restoreKeys,omitempty" expr:"template"`
+
+	// paths to store in the cache, relative to the working directory
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	Paths []string `json:"paths" expr:"template"`
+
+	// working directory to override, so it will be used as a base dir
+	WorkingDir *string `json:"workingDir,omitempty" expr:"template"`
+
+	// how widely the entry is shared (defaults to workflow)
+	// +kubebuilder:validation:Enum=workflow;environment
+	Scope CacheScope `json:"scope,omitempty" expr:"ignore"`
+
+	// should a volume be mounted at every cached path that is not part of one already
+	// (true if not specified); a path outside any volume would otherwise be restored
+	// into a container's own filesystem, where the step that needs it cannot see it
+	Mount *bool `json:"mount,omitempty" expr:"ignore"`
+}
+
+type TestExecutionRequest struct {
+	// test execution custom name
+	Name string `json:"name,omitempty" expr:"template"`
+	// test execution labels
+	ExecutionLabels map[string]string `json:"executionLabels,omitempty" expr:"template,template"`
+	// variables file content - need to be in format for particular executor (e.g. postman envs file)
+	VariablesFile           string                      `json:"variablesFile,omitempty" expr:"template"`
+	IsVariablesFileUploaded bool                        `json:"isVariablesFileUploaded,omitempty" expr:"ignore"`
+	Variables               map[string]testsv3.Variable `json:"variables,omitempty" expr:"template,force"`
+	// test secret uuid
+	TestSecretUUID string `json:"testSecretUUID,omitempty" expr:"template"`
+	// additional executor binary arguments
+	Args []string `json:"args,omitempty" expr:"template"`
+	// usage mode for arguments
+	ArgsMode testsv3.ArgsModeType `json:"argsMode,omitempty" expr:"template"`
+	// executor binary command
+	Command []string `json:"command,omitempty" expr:"template"`
+	// container executor image
+	Image string `json:"image,omitempty" expr:"template"`
+	// container executor image pull secrets
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty" expr:"template"`
+	// whether to start execution sync or async
+	Sync bool `json:"sync,omitempty" expr:"ignore"`
+	// http proxy for executor containers
+	HttpProxy string `json:"httpProxy,omitempty" expr:"template"`
+	// https proxy for executor containers
+	HttpsProxy string `json:"httpsProxy,omitempty" expr:"template"`
+	// negative test will fail the execution if it is a success and it will succeed if it is a failure
+	NegativeTest bool `json:"negativeTest,omitempty" expr:"ignore"`
+	// Optional duration in seconds the pod may be active on the node relative to
+	// StartTime before the system will actively try to mark it failed and kill associated containers.
+	// Value must be a positive integer.
+	ActiveDeadlineSeconds int64                    `json:"activeDeadlineSeconds,omitempty" expr:"ignore"`
+	ArtifactRequest       *testsv3.ArtifactRequest `json:"artifactRequest,omitempty" expr:"force"`
+	// job template extensions
+	JobTemplate string `json:"jobTemplate,omitempty" expr:"ignore"`
+	// cron job template extensions
+	CronJobTemplate string `json:"cronJobTemplate,omitempty" expr:"ignore"`
+	// script to run before test execution
+	PreRunScript string `json:"preRunScript,omitempty" expr:"template"`
+	// script to run after test execution
+	PostRunScript string `json:"postRunScript,omitempty" expr:"template"`
+	// execute post run script before scraping (prebuilt executor only)
+	ExecutePostRunScriptBeforeScraping bool `json:"executePostRunScriptBeforeScraping,omitempty" expr:"ignore"`
+	// run scripts using source command (container executor only)
+	SourceScripts bool `json:"sourceScripts,omitempty" expr:"ignore"`
+	// scraper template extensions
+	ScraperTemplate string `json:"scraperTemplate,omitempty" expr:"ignore"`
+	// config map references
+	EnvConfigMaps []testsv3.EnvReference `json:"envConfigMaps,omitempty" expr:"force"`
+	// secret references
+	EnvSecrets []testsv3.EnvReference `json:"envSecrets,omitempty" expr:"force"`
+	// namespace for test execution (Pro edition only)
+	ExecutionNamespace string `json:"executionNamespace,omitempty" expr:"template"`
+}

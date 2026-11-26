@@ -1,0 +1,10 @@
+* @kubeshop/testkube-backend
+
+/test/ @kubeshop/testkube-qa @kubeshop/testkube-backend
+
+/.github/ @kubeshop/testkube-devops
+/goreleaser_files/ @kubeshop/testkube-devops
+.goreleaser.yml @kubeshop/testkube-devops
+.goreleaser-dev.yml @kubeshop/testkube-devops
+.golangci.yml @kubeshop/testkube-devops
+.builds-* @kubeshop/testkube-devops

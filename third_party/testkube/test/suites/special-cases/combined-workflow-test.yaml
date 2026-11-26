@@ -1,0 +1,22 @@
+apiVersion: testworkflows.testkube.io/v1
+kind: TestWorkflow
+metadata:
+  name: artillery-workflow-suite-combined
+  labels:
+    core-tests: workflows-suite
+    type: suite
+    tool: artillery
+  annotations:
+    testkube.io/description: "Combined Artillery TestWorkflow and legacy Test execution suite"
+spec:
+  container:
+    resources:
+      requests:
+        cpu: 32m
+        memory: 32Mi
+  steps:
+  - execute:
+      workflows:
+      - name: artillery-workflow-smoke
+      tests:
+      - name: artillery-executor-smoke

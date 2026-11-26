@@ -1,0 +1,89 @@
+package testworkflowtemplates
+
+import (
+	"io"
+	"os"
+
+	"github.com/spf13/cobra"
+
+	testworkflowsv1 "github.com/kubeshop/testkube/api/testworkflows/v1"
+	"github.com/kubeshop/testkube/cmd/kubectl-testkube/commands/common"
+	common2 "github.com/kubeshop/testkube/internal/crdcommon"
+	"github.com/kubeshop/testkube/pkg/mapper/testworkflows"
+	"github.com/kubeshop/testkube/pkg/ui"
+)
+
+func NewCreateTestWorkflowTemplateCmd() *cobra.Command {
+	var (
+		name     string
+		filePath string
+		update   bool
+		dryRun   bool
+	)
+
+	cmd := &cobra.Command{
+		Use:     "testworkflowtemplate",
+		Aliases: []string{"testworkflowtemplates", "twt"},
+		Args:    cobra.MaximumNArgs(0),
+		Short:   "Create test workflow template",
+
+		Run: func(cmd *cobra.Command, _ []string) {
+			namespace := cmd.Flag("namespace").Value.String()
+
+			var bytes []byte
+			var err error
+			if filePath == "" {
+				fi, err := os.Stdin.Stat()
+				ui.ExitOnError("reading stdin", err)
+				if fi.Mode()&os.ModeDevice != 0 {
+					ui.Failf("you need to pass stdin or --file argument with file path")
+				}
+				bytes, err = io.ReadAll(cmd.InOrStdin())
+				ui.ExitOnError("reading input", err)
+			} else {
+				bytes, err = common.ReadFileOrStdin(cmd, filePath)
+				ui.ExitOnError("reading "+filePath+" file", err)
+			}
+
+			client, _, err := common.GetClient(cmd)
+			ui.ExitOnError("getting client", err)
+
+			err = client.ValidateTestWorkflowTemplate(bytes)
+			ui.ExitOnError("error validating test workflow template against crd schema", err)
+			if dryRun {
+				ui.SuccessAndExit("TestWorkflowTemplate specification is valid")
+			}
+
+			obj := new(testworkflowsv1.TestWorkflowTemplate)
+			err = common2.DeserializeCRD(obj, bytes)
+			ui.ExitOnError("deserializing input", err)
+
+			common2.AppendTypeMeta("TestWorkflowTemplate", testworkflowsv1.GroupVersion, obj)
+			obj.Namespace = namespace
+			if name != "" {
+				obj.Name = name
+			}
+
+			workflow, _ := client.GetTestWorkflowTemplate(obj.Name)
+			if workflow.Name != "" {
+				if !update {
+					ui.Failf("Test workflow template with name '%s' already exists in namespace %s, use --update flag for upsert", obj.Name, namespace)
+				}
+				_, err = client.UpdateTestWorkflowTemplate(testworkflows.MapTestWorkflowTemplateKubeToAPI(*obj))
+				ui.ExitOnError("updating test workflow template "+obj.Name+" in namespace "+obj.Namespace, err)
+				ui.Success("Test workflow template updated", namespace, "/", obj.Name)
+			} else {
+				_, err = client.CreateTestWorkflowTemplate(testworkflows.MapTestWorkflowTemplateKubeToAPI(*obj))
+				ui.ExitOnError("creating test workflow "+obj.Name+" in namespace "+obj.Namespace, err)
+				ui.Success("Test workflow template created", namespace, "/", obj.Name)
+			}
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "test workflow template name")
+	cmd.Flags().BoolVar(&update, "update", false, "update, if test workflow template already exists")
+	cmd.Flags().StringVarP(&filePath, "file", "f", "", "file path to get the test workflow template specification, or - to read it from stdin")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate test workflow template specification yaml")
+
+	return cmd
+}

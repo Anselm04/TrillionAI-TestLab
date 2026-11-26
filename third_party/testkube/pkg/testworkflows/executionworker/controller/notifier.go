@@ -1,0 +1,674 @@
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	color2 "github.com/gookit/color"
+
+	"github.com/kubeshop/testkube/cmd/testworkflow-init/constants"
+	"github.com/kubeshop/testkube/cmd/testworkflow-init/instructions"
+	"github.com/kubeshop/testkube/internal/common"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	log2 "github.com/kubeshop/testkube/pkg/log"
+	watchers2 "github.com/kubeshop/testkube/pkg/testworkflows/executionworker/controller/watchers"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/action/actiontypes"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/stage"
+)
+
+const (
+	DefaultErrorMessage = "Job has been aborted"
+)
+
+// Not thread-safe, should be used synchronously
+type notifier struct {
+	// Data
+	result      testkube.TestWorkflowResult
+	state       watchers2.ExecutionState
+	scheduledAt time.Time
+
+	// Temporary data to avoid finishing too early
+	lastTs time.Time
+	ended  bool
+
+	// The step that holds the cause that alignCause wrote
+	causeRef string
+	// The cause that alignCause wrote, nil when it wrote none. The step message is its String().
+	causeValue *testkube.Cause
+	// The last state that alignCause checked. The watcher builds a new state for each update.
+	causeState watchers2.ExecutionState
+	// The steps that the init process ended with a reason code and no words of its own. The step
+	// message is the sentence of the code, so the plain cause of the step is empty.
+	codeOnly map[string]bool
+
+	// Cached data for better performance
+	actions     actiontypes.ActionGroups
+	endRefs     [][]string
+	sigSequence []testkube.TestWorkflowSignature
+
+	// Sending state
+	ctx context.Context
+	ch  chan ChannelMessage[Notification]
+}
+
+func (n *notifier) send(value Notification) {
+	// Ignore when the channel is already closed
+	defer func() {
+		recover()
+	}()
+	select {
+	case <-n.ctx.Done():
+	case n.ch <- ChannelMessage[Notification]{Value: value}:
+	}
+}
+
+func (n *notifier) error(err error) {
+	// Ignore when the channel is already closed
+	defer func() {
+		recover()
+	}()
+	select {
+	case <-n.ctx.Done():
+	case n.ch <- ChannelMessage[Notification]{Error: err}:
+	}
+}
+
+// TODO: Find a way to avoid sending if it is identical
+func (n *notifier) sendResult() {
+	result := n.result.Clone()
+	n.send(Notification{Timestamp: result.LatestTimestamp(), Result: result})
+}
+
+func (n *notifier) Raw(ref string, ts time.Time, message string, temporary bool) {
+	if ts.After(n.lastTs) {
+		n.lastTs = ts
+	}
+	if message != "" {
+		if ref == constants.InitStepName {
+			ref = ""
+		}
+		n.send(Notification{
+			Timestamp: ts.UTC(),
+			Log:       message,
+			Ref:       ref,
+			Temporary: temporary,
+		})
+	}
+}
+
+func (n *notifier) Log(ref string, ts time.Time, message string) {
+	if message != "" {
+		n.Raw(ref, ts, fmt.Sprintf("%s %s", ts.Format(constants.PreciseTimeFormat), message), false)
+	}
+}
+
+func (n *notifier) requestAbort(reason testkube.StopReason) {
+	n.send(Notification{Timestamp: time.Now().UTC(), AbortReason: reason})
+}
+
+func (n *notifier) Error(err error) {
+	n.error(err)
+}
+
+func (n *notifier) Event(ref string, ts time.Time, level, reason, message, execution string) {
+	log2.DefaultLogger.Debugw("notify event while watching pod", "execution", execution, "reason", reason, "level", level, "message", message, "timestamp", ts)
+	color := color2.FgGray.Render
+	if level != "Normal" {
+		color = color2.FgYellow.Render
+	}
+	log := color(fmt.Sprintf("(%s) %s", reason, message))
+	n.Raw(ref, ts, fmt.Sprintf("%s %s\n", ts.Format(constants.PreciseTimeFormat), log), level == "Normal")
+}
+
+func (n *notifier) Output(ref string, ts time.Time, output *instructions.Instruction) {
+	if ref == constants.InitStepName {
+		ref = ""
+	} else if ref != "" {
+		if _, ok := n.result.Steps[ref]; !ok {
+			return
+		}
+	}
+	n.send(Notification{Timestamp: ts.UTC(), Ref: ref, Output: output})
+}
+
+func (n *notifier) useSignature(sig []stage.Signature) {
+	n.sigSequence = stage.MapSignatureListToInternal(stage.MapSignatureToSequence(sig))
+}
+
+func (n *notifier) useActionGroups(actions actiontypes.ActionGroups) {
+	n.actions = actions
+	_, n.endRefs = ExtractRefsFromActionGroup(actions)
+}
+
+func (n *notifier) Align(state watchers2.ExecutionState) {
+	log2.DefaultLogger.Debugw("notify alignment while watching pod", "execution", getExecutionId(state))
+
+	defer n.sendResult()
+	defer n.reconcile()
+
+	n.state = state
+
+	// Cache the data used for reconciliation
+	if len(n.sigSequence) == 0 {
+		sig, _ := n.state.Signature()
+		n.useSignature(sig)
+	}
+	if len(n.actions) == 0 {
+		actions, _ := n.state.ActionGroups()
+		n.useActionGroups(actions)
+	}
+
+	// Initialization phase
+	if !state.EstimatedJobCreationTimestamp().IsZero() {
+		n.result.QueuedAt = state.EstimatedJobCreationTimestamp().UTC()
+	}
+	if !state.EstimatedPodCreationTimestamp().IsZero() {
+		n.result.StartedAt = state.EstimatedPodCreationTimestamp().UTC()
+	}
+	n.alignCause(state)
+
+	// Create missing step results that are recognized with the signature
+	for i := range n.sigSequence {
+		if _, ok := n.result.Steps[n.sigSequence[i].Ref]; !ok {
+			n.result.Steps[n.sigSequence[i].Ref] = testkube.TestWorkflowStepResult{
+				Status: common.Ptr(testkube.QUEUED_TestWorkflowStepStatus),
+			}
+		}
+	}
+}
+
+func (n *notifier) anyStepRunning() bool {
+	for _, step := range n.result.Steps {
+		if step.Status != nil && (*step.Status == testkube.RUNNING_TestWorkflowStepStatus || *step.Status == testkube.PAUSED_TestWorkflowStepStatus) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitingStep returns the step that waits for its container: the initialization step until it finishes,
+// then the first leaf step that did not start. It returns an empty ref when no step waits.
+func (n *notifier) waitingStep() string {
+	if !n.result.Initialization.Status.Finished() {
+		return constants.InitStepName
+	}
+	for _, sig := range n.sigSequence {
+		if sig.Ref == constants.InitStepName || len(sig.Children) > 0 {
+			continue
+		}
+		if n.result.Steps[sig.Ref].Status.NotStarted() {
+			return sig.Ref
+		}
+	}
+	return ""
+}
+
+func (n *notifier) stepResult(ref string) testkube.TestWorkflowStepResult {
+	if ref == constants.InitStepName {
+		return *n.result.Initialization
+	}
+	return n.result.Steps[ref]
+}
+
+func (n *notifier) setStepResult(ref string, step testkube.TestWorkflowStepResult) {
+	if ref == constants.InitStepName {
+		n.result.Initialization = common.Ptr(step)
+		return
+	}
+	n.result.Steps[ref] = step
+}
+
+// alignCause writes the cause that keeps a container from running into the step that waits for it.
+// It returns true when a message changed. It checks each state one time.
+func (n *notifier) alignCause(state watchers2.ExecutionState) bool {
+	if state == n.causeState {
+		return false
+	}
+	n.causeState = state
+	// Another writer replaced the message of the cause, for example the result of the step. The notifier does not own it anymore.
+	if n.causeValue != nil && n.stepResult(n.causeRef).ErrorMessage != n.written() {
+		n.clearCause()
+	}
+	cause, message, ref, ok := n.pendingCause(state)
+	if !ok {
+		return false
+	}
+	step := n.stepResult(ref)
+	step.ErrorMessage = message
+	step.ErrorReason = ""
+	if cause != nil {
+		step.ErrorReason = cause.Reason
+		// The event time of a complete execution moves its completion time, so only a waiting execution logs the cause.
+		if !state.Completed() {
+			n.Event(ref, time.Now(), "Warning", cause.Reason, cause.Message, getExecutionId(state))
+		}
+	}
+	n.setStepResult(ref, step)
+	n.causeRef, n.causeValue = ref, cause
+	if cause == nil {
+		n.clearCause()
+	}
+	return true
+}
+
+// clearCause forgets the cause that alignCause wrote. After it, the notifier does not own the message of the step.
+func (n *notifier) clearCause() {
+	n.causeRef, n.causeValue = "", nil
+}
+
+// written returns the message of the cause that alignCause wrote, empty when it wrote none.
+func (n *notifier) written() string {
+	if n.causeValue == nil {
+		return ""
+	}
+	return n.causeValue.String()
+}
+
+// pendingCause returns the current cause, its message, the step for the message, and true when the message must change.
+// The message changes only when it is empty or when the notifier wrote it.
+func (n *notifier) pendingCause(state watchers2.ExecutionState) (*testkube.Cause, string, string, bool) {
+	ref := n.waitingStep()
+	// A running step, or another waiting step, shows that the container of the cause started.
+	// Then the notifier clears its own cause, also after the execution completes.
+	if n.causeValue != nil && (n.anyStepRunning() || ref != n.causeRef) {
+		return nil, "", n.causeRef, n.stepResult(n.causeRef).ErrorMessage == n.written()
+	}
+	if ref == "" || n.anyStepRunning() {
+		return nil, "", "", false
+	}
+	cause := state.CurrentCause()
+	message := ""
+	if cause != nil {
+		message = cause.String()
+	}
+	if message == n.written() || n.keepsCause(cause, ref) {
+		return nil, "", "", false
+	}
+	// Kubernetes deletes the pod of an ended execution, so the cause goes away with the pod. Keep the last cause.
+	if cause == nil && state.Completed() {
+		return nil, "", "", false
+	}
+	if existing := n.stepResult(ref).ErrorMessage; existing != n.written() && existing != message {
+		return nil, "", "", false
+	}
+	return cause, message, ref, true
+}
+
+// keepsCause reports whether the step keeps the cause that the notifier wrote. While Kubernetes
+// only waits to try again, its message does not say why the action failed, so the earlier
+// message of the same code stays.
+func (n *notifier) keepsCause(cause *testkube.Cause, ref string) bool {
+	isRetryCause := cause != nil && cause.Retry
+	isWrittenForStep := n.causeValue != nil && ref == n.causeRef
+	return isRetryCause && isWrittenForStep && n.stepResult(ref).ErrorReason == cause.Reason
+}
+
+// Instruction applies the precise hint information about the action that took place
+func (n *notifier) Instruction(ts time.Time, hint instructions.Instruction, executionId string) {
+	log2.DefaultLogger.Debugw("notify instruction while watching pod", "execution", executionId, "hint", hint.Name)
+	defer n.sendResult()
+	defer n.reconcile()
+
+	// Ensure we have UTC timestamp
+	ts = ts.UTC()
+
+	// Load the current step information
+	init := hint.Ref == constants.InitStepName
+	step, ok := n.result.Steps[hint.Ref]
+	if init {
+		step = *n.result.Initialization
+		ok = true
+	}
+
+	// Ignore the virtual steps
+	if !ok {
+		return
+	}
+
+	// Apply the hint
+	switch hint.Name {
+	case constants.InstructionStart:
+		step.StartedAt = ts
+		step.Status = common.Ptr(testkube.RUNNING_TestWorkflowStepStatus)
+		// The container of the step started, so the cause of its wait does not apply anymore.
+		if n.causeValue != nil && hint.Ref == n.causeRef && step.ErrorMessage == n.written() {
+			step.ErrorMessage, step.ErrorReason = "", ""
+			n.clearCause()
+		}
+	case constants.InstructionEnd:
+		status := testkube.TestWorkflowStepStatus(hint.Value.(string))
+		if status == "" {
+			status = testkube.ABORTED_TestWorkflowStepStatus
+		}
+		step.Status = common.Ptr(status)
+		step.FinishedAt = ts
+	case constants.InstructionExecution:
+		serialized, _ := json.Marshal(hint.Value)
+		var executionResult constants.ExecutionResult
+		_ = json.Unmarshal(serialized, &executionResult)
+		step.ExitCode = float64(executionResult.ExitCode)
+		step.Attempts = max(step.Attempts, int32(executionResult.Iteration)+1)
+		switch {
+		case executionResult.Details != "":
+			// The init process sends the code of its own causes, and an empty code for a message from a command.
+			step.ErrorMessage, step.ErrorReason = executionResult.Details, executionResult.Reason
+			delete(n.codeOnly, hint.Ref)
+		case executionResult.Reason != "":
+			// The code alone says what happened, so the step message is the sentence of the code.
+			step.ErrorMessage = testkube.Cause{Reason: executionResult.Reason}.String()
+			step.ErrorReason = executionResult.Reason
+			if n.codeOnly == nil {
+				n.codeOnly = map[string]bool{}
+			}
+			n.codeOnly[hint.Ref] = true
+		}
+	case constants.InstructionIteration:
+		// The init process sends the iteration before each retry, and the iteration starts at 0.
+		// An attempt that times out sends no execution result, so the iteration also counts the attempts.
+		serialized, _ := json.Marshal(hint.Value)
+		var iteration int32
+		_ = json.Unmarshal(serialized, &iteration)
+		step.Attempts = max(step.Attempts, iteration+1)
+		// A retry starts a new attempt, so the message of the previous attempt does not describe the step anymore.
+		step.ErrorMessage, step.ErrorReason = "", ""
+		delete(n.codeOnly, hint.Ref)
+	case constants.InstructionPause:
+		pauseTsStr := hint.Value.(string)
+		pauseTs, err := time.Parse(time.RFC3339Nano, pauseTsStr)
+		if err != nil {
+			pauseTs = ts
+		}
+		if !n.result.HasPauseAt(hint.Ref, pauseTs) {
+			step.Status = common.Ptr(testkube.PAUSED_TestWorkflowStepStatus)
+			n.result.Pauses = append(n.result.Pauses, testkube.TestWorkflowPause{Ref: hint.Ref, PausedAt: pauseTs})
+		}
+	case constants.InstructionResume:
+		resumeTsStr := hint.Value.(string)
+		resumeTs, err := time.Parse(time.RFC3339Nano, resumeTsStr)
+		if err != nil {
+			resumeTs = ts
+		}
+		if n.result.HasPauseAt(hint.Ref, resumeTs) {
+			step.Status = common.Ptr(testkube.RUNNING_TestWorkflowStepStatus)
+			for pi, p := range n.result.Pauses {
+				if p.Ref != hint.Ref {
+					continue
+				}
+				// Check if it's not already covered by that period
+				if !p.PausedAt.After(resumeTs) && !p.ResumedAt.Before(resumeTs) {
+					break
+				}
+				// Check if the period could not be fulfilled with that timestamp
+				if !p.PausedAt.After(resumeTs) && (p.ResumedAt.IsZero() || p.ResumedAt.Equal(resumeTs)) {
+					n.result.Pauses[pi].ResumedAt = resumeTs
+					break
+				}
+			}
+		}
+	}
+
+	// Save the step
+	if init {
+		n.result.Initialization = common.Ptr(step)
+	} else {
+		n.result.Steps[hint.Ref] = step
+	}
+}
+
+// End tries to finalize the result based on the available data.
+// It will try to fill all the gaps.
+func (n *notifier) End() {
+	defer n.sendResult()
+
+	// Mark as finished
+	n.ended = true
+
+	n.alignFinalCause()
+
+	// Ensure that the steps without the information are fulfilled and marked as aborted
+	n.fillGaps(true)
+
+	// One read of the job, so the termination code and the reason code describe the same stop.
+	stop := watchers2.GetJobStop(n.state.Job().Original())
+	errorMessage := DefaultErrorMessage
+	if n.state != nil && n.state.ExecutionError() != "" {
+		errorMessage = n.state.ExecutionError()
+	}
+	causes := testkube.StopCauses{Stop: stop, Written: n.writtenCauses(), Ending: n.state.EndingError()}
+	stop.Causes = n.result.HealAbortedOrCanceled(n.sigSequence, errorMessage, DefaultErrorMessage, stop.Code, n.terminationReason(stop), &causes)
+	// The heal does not end a step that the init process ended, so the step keeps the sentence of its code.
+	for ref := range n.codeOnly {
+		if ref == constants.InitStepName {
+			ref = ""
+		}
+		if _, ok := stop.Causes[ref]; !ok {
+			stop.Causes[ref] = ""
+		}
+	}
+
+	// Finalize the status
+	n.reconcile()
+
+	// The classifier reads the final result, so it runs after the reconcile settles the statuses.
+	n.result.StatusDetails = n.result.ClassifyStatus(n.sigSequence, stop)
+}
+
+// alignFinalCause writes the waiting cause that only the final list of events reports. A deleted
+// pod is finished, so CurrentCause reads no cause from it, but its events still hold the cause.
+// Only the initialization step gets it, because a pod that never started holds no other step, and
+// a cause that the step already holds stays.
+func (n *notifier) alignFinalCause() {
+	if n.state == nil || n.waitingStep() != constants.InitStepName {
+		return
+	}
+	step := n.stepResult(constants.InitStepName)
+	if step.ErrorMessage != "" || step.ErrorReason != "" {
+		return
+	}
+	cause := n.state.PodEvents().WaitingCause()
+	if cause == nil && n.state.Pod() == nil {
+		cause = n.state.JobEvents().WaitingCause()
+	}
+	if cause == nil {
+		return
+	}
+	step.ErrorMessage, step.ErrorReason = cause.String(), cause.Reason
+	n.setStepResult(constants.InitStepName, step)
+	// End reads this cause as it reads a cause of alignCause, so the classifier gets its plain text.
+	n.causeRef, n.causeValue = constants.InitStepName, cause
+}
+
+// writtenCauses returns the cause that alignCause wrote, by the reference that the heal and the
+// classifier use, with an empty reference for the initialization step.
+func (n *notifier) writtenCauses() map[string]*testkube.Cause {
+	if n.causeValue == nil {
+		return nil
+	}
+	ref := n.causeRef
+	if ref == constants.InitStepName {
+		ref = ""
+	}
+	return map[string]*testkube.Cause{ref: n.causeValue}
+}
+
+// terminationReason returns the code for the stop of the execution, and an empty string when no
+// signal names one. A cause that Kubernetes reported wins over the reason of the stop, because the
+// cause is what the user fixes and the stop is only the mechanism that ended the execution.
+func (n *notifier) terminationReason(stop testkube.Stop) string {
+	if n.state == nil {
+		return ""
+	}
+	if cause := n.state.TerminationCause(); cause != nil {
+		return cause.Reason
+	}
+	if stop.Reason != "" {
+		return string(stop.Reason)
+	}
+	// These actors stop an execution without a reason, so the actor names the cause.
+	switch stop.Actor {
+	case testkube.StopActorFailFast:
+		return string(testkube.StopReasonFailFast)
+	case testkube.StopActorTrigger:
+		return string(testkube.StopReasonTriggerAbort)
+	case testkube.StopActorSystem:
+		return string(testkube.StopReasonJobDeleted)
+	default:
+		return ""
+	}
+}
+
+func (n *notifier) fillGaps(force bool) {
+	if n.state == nil {
+		return
+	}
+
+	// Mark the initialization step as running
+	if n.state.PodCreated() && n.result.Initialization.Status.NotStarted() {
+		n.result.Initialization.Status = common.Ptr(testkube.RUNNING_TestWorkflowStepStatus)
+	}
+
+	// Don't compute anything more if there is no Pod information
+	if n.state.Pod() == nil {
+		return
+	}
+
+	// Find the furthest step with any status
+	processedStepsCount := 0
+	if force {
+		processedStepsCount = len(n.sigSequence)
+	} else {
+		for i := range n.sigSequence {
+			step := n.result.Steps[n.sigSequence[i].Ref]
+			if !step.Status.NotStarted() {
+				processedStepsCount = i
+				if step.Status.Finished() {
+					processedStepsCount++
+				}
+			}
+		}
+	}
+
+	// Analyze the references
+	containerIndexes := make(map[string]int)
+	refIndexes := make(map[string]int)
+	for containerIndex := range n.endRefs {
+		for refIndex := range n.endRefs[containerIndex] {
+			containerIndexes[n.endRefs[containerIndex][refIndex]] = containerIndex
+			refIndexes[n.endRefs[containerIndex][refIndex]] = refIndex
+		}
+	}
+
+	// Gather the container results
+	containerResults := make([]watchers2.ContainerResult, len(n.actions))
+	for i := range n.actions {
+		containerResults[i] = n.state.Pod().ContainerResult(fmt.Sprintf("%d", i+1), n.state.ExecutionError())
+	}
+
+	// Apply statuses from the container results since the last step
+	for i := 0; i < processedStepsCount; i++ {
+		ref := n.sigSequence[i].Ref
+		container := containerResults[containerIndexes[ref]]
+		if len(container.Statuses) <= refIndexes[ref] {
+			continue
+		}
+
+		// TODO: estimate startedAt/finishedAt too?
+
+		if ref == constants.InitStepName {
+			n.result.Initialization.Status = common.Ptr(container.Statuses[refIndexes[ref]].Status)
+			n.result.Initialization.ExitCode = float64(container.Statuses[refIndexes[ref]].ExitCode)
+		} else {
+			step := n.result.Steps[ref]
+			step.Status = common.Ptr(container.Statuses[refIndexes[ref]].Status)
+			step.ExitCode = float64(container.Statuses[refIndexes[ref]].ExitCode)
+			n.result.Steps[ref] = step
+		}
+	}
+
+	// The initialization is not part of the signature, so the loop above never reaches it and its
+	// status would rest on a log hint alone. The termination message carries the same result and
+	// outlives the hint, so the finalisation falls back to it. A missing key reads as index 0,
+	// which is in range, so the refs resolve with comma-ok rather than a length check alone.
+	if !force || n.result.Initialization.Status.Finished() {
+		return
+	}
+	containerIndex, okContainer := containerIndexes[constants.InitStepName]
+	refIndex, okRef := refIndexes[constants.InitStepName]
+	if !okContainer || !okRef || containerIndex >= len(containerResults) {
+		return
+	}
+	if statuses := containerResults[containerIndex].Statuses; refIndex < len(statuses) {
+		n.result.Initialization.Status = common.Ptr(statuses[refIndex].Status)
+		n.result.Initialization.ExitCode = float64(statuses[refIndex].ExitCode)
+	}
+}
+
+func (n *notifier) reconcile() {
+	// Build the completion timestamp
+	var completionTs time.Time
+	if n.state != nil {
+		completionTs = n.state.CompletionTimestamp()
+	}
+	if !completionTs.IsZero() && n.lastTs.After(completionTs) {
+		completionTs = n.lastTs
+	}
+
+	// Build the timestamp for initial container
+	var containerStartTs time.Time
+	if n.state != nil {
+		containerStartTs = n.state.ContainerStartTimestamp("1")
+	}
+
+	//// TODO: Try to estimate signature sequence (?)
+	//if len(n.sigSequence) == 0 {
+	//}
+
+	n.fillGaps(false)
+	n.result.HealTimestamps(n.sigSequence, n.scheduledAt, containerStartTs, completionTs, n.ended)
+	n.result.HealDuration(n.scheduledAt)
+	n.result.HealMissingPauseStatuses()
+	n.result.HealStatus(n.sigSequence)
+}
+
+// TODO: Optimize memory
+// TODO: Provide initial actions/signature
+func newNotifier(ctx context.Context, initialResult testkube.TestWorkflowResult, scheduledAt time.Time) *notifier {
+	// Apply data that are required yet may be missing
+	if initialResult.Initialization == nil {
+		initialResult.Initialization = &testkube.TestWorkflowStepResult{
+			Status: common.Ptr(testkube.QUEUED_TestWorkflowStepStatus),
+		}
+	}
+	if initialResult.Steps == nil {
+		initialResult.Steps = make(map[string]testkube.TestWorkflowStepResult)
+	}
+
+	// Once a result has reached this stage it can be considered to be in a SCHEDULING state,
+	// as the associated Job and Pod have not yet been scheduled by Kubernetes.
+	// By setting the initial status to SCHEDULING we can ensure that more executions can be
+	// sent to be processed, even if Kubernetes still has to wait for resources to start
+	// the execution.
+	initialResult.Status = common.Ptr(testkube.SCHEDULING_TestWorkflowStatus)
+
+	if !initialResult.FinishedAt.IsZero() {
+		initialResult.FinishedAt = time.Time{}
+	}
+
+	return &notifier{
+		result:      initialResult,
+		scheduledAt: scheduledAt,
+
+		ch:  make(chan ChannelMessage[Notification]),
+		ctx: ctx,
+	}
+}
+
+func getExecutionId(state watchers2.ExecutionState) string {
+	job := state.Job()
+	if job == nil {
+		return ""
+	}
+	return job.Name()
+}

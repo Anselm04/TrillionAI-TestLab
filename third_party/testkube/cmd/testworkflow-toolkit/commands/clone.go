@@ -1,0 +1,792 @@
+package commands
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/kballard/go-shellquote"
+	"github.com/otiai10/copy"
+	"github.com/spf13/cobra"
+
+	"github.com/kubeshop/testkube/cmd/testworkflow-toolkit/common"
+	"github.com/kubeshop/testkube/cmd/testworkflow-toolkit/env"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/cloud"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/constants"
+	"github.com/kubeshop/testkube/pkg/ui"
+)
+
+const (
+	// CloneRetryOnFailureMaxAttempts defines default retry attempts for git operations
+	CloneRetryOnFailureMaxAttempts = 5
+	// CloneRetryOnFailureBaseDelay defines default base delay between retries
+	CloneRetryOnFailureBaseDelay = 100 * time.Millisecond
+	// CloneRetryCountCap is the maximum allowed retry attempts (inclusive)
+	CloneRetryCountCap = 20
+	// CloneRetryDelayCap is the maximum allowed base delay between retries
+	CloneRetryDelayCap = 30 * time.Second
+)
+
+var (
+	// protocolRe matches URI schemes like http://, https://, ssh://
+	protocolRe = regexp.MustCompile(`^[^:]+://`)
+)
+
+// CloneOptions encapsulates all options for the clone command
+type CloneOptions struct {
+	RawPaths   []string
+	Username   string
+	Token      string
+	SSHKey     string
+	AuthType   string
+	Revision   string
+	Cone       bool
+	Verbosity  string
+	RetryCount int
+	RetryDelay time.Duration
+}
+
+// gitFailureKind tells a refusal of access from a server that git cannot reach.
+type gitFailureKind int
+
+const (
+	// gitRefusal is a server that refuses access. A retry cannot fix it.
+	gitRefusal gitFailureKind = iota + 1
+	// gitNetwork is a server that git cannot reach. The network is not part of the workflow, so this
+	// failure gets an infrastructure code, not a configuration code.
+	gitNetwork
+)
+
+// gitFailure is a text that git or SSH writes for a known failure, with the words for the user. Git
+// reports every clone failure with the exit code 128, so the text is the only signal that tells them
+// apart.
+type gitFailure struct {
+	kind  gitFailureKind
+	text  string
+	cause string
+}
+
+// gitFailures hold the failures that the clone step knows, compared without case.
+var gitFailures = []gitFailure{
+	{kind: gitRefusal, text: "Permission denied (publickey)", cause: "the server refused the SSH key"},
+	{kind: gitRefusal, text: "could not read Username", cause: "the repository needs credentials, and git received none"},
+	{kind: gitRefusal, text: "terminal prompts disabled", cause: "the repository needs credentials, and git received none"},
+	{kind: gitRefusal, text: "Authentication failed", cause: "the server refused the credentials"},
+	{kind: gitRefusal, text: "invalid username or password", cause: "the server refused the credentials"},
+	{kind: gitRefusal, text: "HTTP 403", cause: "the server refused the credentials"},
+	{kind: gitRefusal, text: "returned error: 403", cause: "the server refused the credentials"},
+	{kind: gitRefusal, text: "returned error: 401", cause: "the server refused the credentials"},
+	{kind: gitNetwork, text: "could not resolve host"},
+	{kind: gitNetwork, text: "connection refused"},
+	{kind: gitNetwork, text: "connection timed out"},
+	{kind: gitNetwork, text: "operation timed out"},
+	{kind: gitNetwork, text: "failed to connect to"},
+}
+
+// findGitFailure returns the first failure of the kind in the text. The found value is false when
+// the text holds none.
+func findGitFailure(kind gitFailureKind, text string) (gitFailure, bool) {
+	text = strings.ToLower(text)
+	for _, failure := range gitFailures {
+		if failure.kind == kind && strings.Contains(text, strings.ToLower(failure.text)) {
+			return failure, true
+		}
+	}
+	return gitFailure{}, false
+}
+
+// gitDiagnostics keep the "fatal:" line, where git writes the cause of a failure before its hints,
+// and a line that refuses access, which SSH writes before the "fatal:" line.
+var gitDiagnostics = Diagnostics{
+	Cause: func(line string) bool { return strings.HasPrefix(line, "fatal:") },
+	Note: func(line string) bool {
+		_, found := findGitFailure(gitRefusal, line)
+		return found
+	},
+}
+
+func runGit(args ...interface{}) error {
+	return Run(gitDiagnostics, "git", args...)
+}
+
+// runGitWithRetry runs git again after a failure, except after a refusal of access, because a retry
+// cannot fix a credential that the server refused.
+func runGitWithRetry(retries int, delay time.Duration, args ...interface{}) error {
+	return RunWithRetry(retries, delay, isGitAuthError, gitDiagnostics, "git", args...)
+}
+
+// isGitAuthError reports whether the server refused access. Only the output of git tells it, so an
+// error that git did not write is never a refusal.
+func isGitAuthError(err error) bool {
+	var cmdErr *CommandError
+	return errors.As(err, &cmdErr) && cmdErr.Note != ""
+}
+
+// cloneError is the failure of a clone. A credential that git refuses is a different problem from a
+// repository or a revision that does not exist, and the user fixes each one apart, so each gets its
+// own code.
+type cloneError struct {
+	uri string
+	err error
+}
+
+func (e *cloneError) Error() string {
+	return cloneMessage(e.uri, e.err)
+}
+
+func (e *cloneError) Unwrap() error {
+	return e.err
+}
+
+// Reason reads only the output of git, so a text of our own never selects the code of a git failure.
+// An error that git did not write gets git-clone-failed only for an input of the workflow that the
+// step cannot use, such as a bad URI.
+func (e *cloneError) Reason() testkube.StopReason {
+	var cmdErr *CommandError
+	switch {
+	case !errors.As(e.err, &cmdErr):
+		if containsAnyFold(e.err.Error(), cloneInputErrors) {
+			return testkube.StopReasonGitCloneFailed
+		}
+		return ""
+	case isGitAuthError(e.err):
+		return testkube.StopReasonGitAuthFailed
+	case isGitNetworkError(e.err):
+		return testkube.StopReasonGitUnreachable
+	case containsAnyFold(cmdErr.Line, gitMissingErrors):
+		return testkube.StopReasonGitCloneFailed
+	}
+	return ""
+}
+
+// gitMissingErrors are the texts that git writes when the repository, the revision or the path in
+// the workflow does not exist. Only these texts prove a configuration error. Git has many texts for
+// a transport failure, so a failure that none of the lists names gets no code.
+var gitMissingErrors = []string{
+	"repository not found",
+	"' not found",
+	"not found in upstream",
+	"does not appear to be a git repository",
+	"couldn't find remote ref",
+	"did not match any file(s) known to git",
+	"invalid reference",
+	"unknown revision",
+}
+
+// cloneInputErrors are the errors that the clone step returns for an input of the workflow that it
+// cannot use, before git runs.
+var cloneInputErrors = []string{
+	"invalid repository URI",
+	"invalid output path",
+	"setting up authentication",
+	"setting up SSH key",
+}
+
+// containsAnyFold reports whether the text holds one of the parts, compared without case.
+func containsAnyFold(text string, parts []string) bool {
+	text = strings.ToLower(text)
+	for _, part := range parts {
+		if strings.Contains(text, strings.ToLower(part)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGitNetworkError reports whether git could not reach the server. It reads only the lines that git
+// wrote, so a text in a wrapper of the error does not count.
+func isGitNetworkError(err error) bool {
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		return false
+	}
+	_, inLine := findGitFailure(gitNetwork, cmdErr.Line)
+	_, inNote := findGitFailure(gitNetwork, cmdErr.Note)
+	return inLine || inNote
+}
+
+// cloneMessage returns the step message for a clone failure. The diagnostic line of git names the
+// cause, so the message drops the steps of the clone and the exit status. A refusal of access gets
+// a sentence that says what the user fixes. The log keeps the full output of git.
+func cloneMessage(rawURI string, err error) string {
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		return err.Error()
+	}
+	refusal, found := findGitFailure(gitRefusal, cmdErr.Note)
+	if !found {
+		return strings.TrimPrefix(cmdErr.Line, "fatal: ")
+	}
+	host := "the repository"
+	if uri, uriErr := normalizeGitURI(rawURI); uriErr == nil && uri.Hostname() != "" {
+		host = uri.Hostname()
+	}
+	return fmt.Sprintf("Git cannot authenticate to %s: %s.", host, refusal.cause)
+}
+
+// NewCloneCmd creates a new clone command
+func NewCloneCmd() *cobra.Command {
+	opts := &CloneOptions{}
+
+	cmd := &cobra.Command{
+		Use:   "clone <uri> <outputPath>",
+		Short: "Clone the Git repository",
+		Args:  cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := RunClone(cmd.Context(), args[0], args[1], opts); err != nil {
+				fmt.Println(err.Error())
+				common.Fail(&cloneError{uri: args[0], err: err})
+			}
+		},
+	}
+
+	cmd.Flags().StringSliceVarP(&opts.RawPaths, "paths", "p", nil, "paths for sparse checkout")
+	cmd.Flags().StringVarP(&opts.Username, "username", "u", "", "git username for authentication")
+	cmd.Flags().StringVarP(&opts.Token, "token", "t", "", "git token for authentication")
+	cmd.Flags().StringVarP(&opts.SSHKey, "sshKey", "s", "", "SSH private key for authentication")
+	cmd.Flags().StringVarP(&opts.AuthType, "authType", "a", "basic", "authentication type (allowed: basic, header, github, gitlab)")
+	cmd.Flags().StringVarP(&opts.Revision, "revision", "r", "", "commit hash, branch name or tag")
+	cmd.Flags().BoolVar(&opts.Cone, "cone", false, "enable cone mode for sparse checkout")
+	cmd.Flags().StringVar(&opts.Verbosity, "verbosity", "verbose", "logging level (allowed: quiet, normal, verbose)")
+	cmd.Flags().IntVar(&opts.RetryCount, "retry-count", CloneRetryOnFailureMaxAttempts, fmt.Sprintf("max attempts for transient git failures (capped at %d)", CloneRetryCountCap))
+	cmd.Flags().DurationVar(&opts.RetryDelay, "retry-delay", CloneRetryOnFailureBaseDelay, fmt.Sprintf("base delay between git retry attempts (capped at %s)", CloneRetryDelayCap))
+
+	return cmd
+}
+
+// RunClone executes the clone operation (exported for testing)
+func RunClone(ctx context.Context, rawURI string, outputPath string, opts *CloneOptions) error {
+	uri, err := normalizeGitURI(rawURI)
+	if err != nil {
+		return fmt.Errorf("invalid repository URI: %w", err)
+	}
+
+	destinationPath, err := filepath.Abs(outputPath)
+	if err != nil {
+		return fmt.Errorf("invalid output path: %w", err)
+	}
+
+	// Disable git interactivity
+	os.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+	// Setup authentication
+	authArgs, err := setupAuthentication(ctx, uri, opts)
+	if err != nil {
+		return fmt.Errorf("setting up authentication: %w", err)
+	}
+
+	// Setup credential store for reliable auth across redirects (best-effort)
+	var cleanupCreds func()
+	var credentialConfigArgs []string
+	if opts.AuthType == "gitlab" {
+		cleanupCreds, credentialConfigArgs, err = setupGitLabCredentialStore(uri)
+		if err != nil {
+			return fmt.Errorf("setting up GitLab credential store: %w", err)
+		}
+		uri.User = nil
+	} else {
+		cleanupCreds = setupCredentialStore(uri)
+	}
+	defer cleanupCreds()
+
+	// Setup SSH if provided
+	cleanupSSH, err := setupSSHKey(opts.SSHKey)
+	if err != nil {
+		return fmt.Errorf("setting up SSH key: %w", err)
+	}
+	defer cleanupSSH()
+
+	// Use temporary directory for cloning
+	tmpPath, err := os.MkdirTemp(constants.DefaultTmpDirPath, "clone-*")
+	if err != nil {
+		return fmt.Errorf("creating temporary directory: %w", err)
+	}
+	// Ensure cleanup on any error
+	defer func() {
+		if err = os.RemoveAll(tmpPath); err != nil {
+			err = fmt.Errorf("error cleaning up temporary directory: %w", err)
+		}
+	}()
+
+	// Configure git settings
+	configArgs := []string{
+		"-c", fmt.Sprintf("safe.directory=%s", tmpPath),
+		"-c", "advice.detachedHead=false",
+	}
+	configArgs = append(configArgs, credentialConfigArgs...)
+
+	// Clean paths for sparse checkout
+	paths := cleanPaths(opts.RawPaths, opts.Cone)
+
+	if !opts.isQuiet() {
+		fmt.Printf("📦 ")
+	}
+
+	// Perform the clone operation
+	if err := performClone(uri.String(), tmpPath, configArgs, authArgs, opts, paths); err != nil {
+		return fmt.Errorf("error cloning repository: %w", err)
+	}
+
+	// Copy files to destination
+	if err := copyRepositoryContents(tmpPath, destinationPath, opts); err != nil {
+		return fmt.Errorf("error copying files to destination: %w", err)
+	}
+
+	// Adjust file permissions
+	if err := adjustFilePermissions(destinationPath, opts); err != nil {
+		return fmt.Errorf("error adjusting permissions: %w", err)
+	}
+
+	// List directory contents
+	if err := listDirectoryContents(destinationPath, opts); err != nil {
+		return fmt.Errorf("error listing directory contents: %w", err)
+	}
+
+	return nil
+}
+
+func (opts *CloneOptions) isQuiet() bool {
+	return opts.Verbosity == "quiet"
+}
+
+// gitLogArgs returns git flags for the configured verbosity. Omit/unknown defaults to verbose.
+func (opts *CloneOptions) gitLogArgs() []string {
+	switch opts.Verbosity {
+	case "quiet":
+		return []string{"--quiet"}
+	case "normal":
+		return nil
+	default:
+		return []string{"--verbose"}
+	}
+}
+
+func (opts *CloneOptions) retrySettings() (int, time.Duration) {
+	count := CloneRetryOnFailureMaxAttempts
+	delay := CloneRetryOnFailureBaseDelay
+	if opts.RetryCount > 0 {
+		count = opts.RetryCount
+	}
+	if opts.RetryDelay > 0 {
+		delay = opts.RetryDelay
+	}
+	if count > CloneRetryCountCap {
+		count = CloneRetryCountCap
+	}
+	if delay > CloneRetryDelayCap {
+		delay = CloneRetryDelayCap
+	}
+	return count, delay
+}
+
+// normalizeGitURI normalizes a git URI by adding appropriate protocol if missing
+func normalizeGitURI(rawURI string) (*url.URL, error) {
+	// Convert SSH format (git@github.com:owner/repo.git) to URL format
+	if !protocolRe.MatchString(rawURI) && strings.ContainsRune(rawURI, ':') && !strings.ContainsRune(rawURI, '\\') {
+		rawURI = "ssh://" + strings.Replace(rawURI, ":", "/", 1)
+	}
+	return url.Parse(rawURI)
+}
+
+// setupAuthentication configures git authentication based on the auth type
+func setupAuthentication(ctx context.Context, uri *url.URL, opts *CloneOptions) ([]string, error) {
+	authArgs := make([]string, 0)
+
+	switch opts.AuthType {
+	case "header":
+		ui.Debug("auth type: header")
+		if opts.Token != "" {
+			authArgs = append(authArgs, "-c", fmt.Sprintf("http.extraHeader=Authorization: Bearer %s", opts.Token))
+		}
+		if opts.Username != "" {
+			uri.User = url.User(opts.Username)
+		}
+
+	case "gitlab":
+		client, err := env.Cloud()
+		if err != nil {
+			return nil, fmt.Errorf("could not create cloud client: %w", err)
+		}
+		if err := setupGitLabAuthentication(ctx, uri, opts, client); err != nil {
+			return nil, err
+		}
+
+	case "github":
+		ui.Debug("auth type: github")
+		client, err := env.Cloud()
+		if err != nil {
+			return nil, fmt.Errorf("could not create cloud client: %w", err)
+		}
+		githubToken, err := client.GetGitHubToken(ctx, uri.String())
+		if err == nil {
+			// GitHub uses x-access-token as username for token auth
+			uri.User = url.UserPassword("x-access-token", githubToken)
+		}
+
+	default: // basic auth
+		ui.Debug("auth type: basic")
+		if opts.Username != "" && opts.Token != "" {
+			uri.User = url.UserPassword(opts.Username, opts.Token)
+		} else if opts.Username != "" {
+			uri.User = url.User(opts.Username)
+		} else if opts.Token != "" {
+			uri.User = url.User(opts.Token)
+		}
+	}
+
+	return authArgs, nil
+}
+
+// setupSSHKey configures SSH authentication if an SSH key is provided and returns a cleanup function
+func setupSSHKey(sshKey string) (func(), error) {
+	if sshKey == "" {
+		return func() {}, nil
+	}
+
+	// Ensure newline at EOF
+	sshKey = strings.TrimRight(sshKey, "\n") + "\n"
+
+	// Create temp file for SSH key
+	tmpFile, err := os.CreateTemp(constants.DefaultTmpDirPath, "ssh-key-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file for SSH key: %w", err)
+	}
+	sshKeyPath := tmpFile.Name()
+	tmpFile.Close() // Close it so we can write to it with proper permissions
+
+	if err := os.WriteFile(sshKeyPath, []byte(sshKey), 0400); err != nil {
+		_ = os.Remove(sshKeyPath)
+		return nil, fmt.Errorf("writing SSH key: %w", err)
+	}
+
+	// Configure SSH command
+	sshCmd := shellquote.Join("ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-i", sshKeyPath)
+	os.Setenv("GIT_SSH_COMMAND", sshCmd)
+
+	return func() { _ = os.Remove(sshKeyPath) }, nil
+}
+
+// GitLab runs in a non-root toolkit container whose HOME may be read-only.
+// Keep credentials in a private temporary file and overlay the helper with
+// command-scoped options. Existing global CA, proxy and other connection settings
+// remain available, and no write to HOME or repository configuration is required.
+func setupGitLabCredentialStore(uri *url.URL) (func(), []string, error) {
+	if uri.User == nil {
+		return nil, nil, fmt.Errorf("GitLab checkout credentials are missing")
+	}
+	dir, err := os.MkdirTemp(constants.DefaultTmpDirPath, "gitlab-auth-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	credentialURL := &url.URL{Scheme: uri.Scheme, Host: uri.Host, User: uri.User, Path: uri.Path, RawPath: uri.RawPath}
+	credentials := filepath.Join(dir, "credentials")
+	if err = os.WriteFile(credentials, []byte(credentialURL.String()+"\n"), 0600); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	// An empty helper resets inherited helpers before adding the scoped store.
+	return cleanup, []string{"-c", "credential.helper=", "-c", "credential.helper=store --file " + shellquote.Join(credentials)}, nil
+}
+
+// setupCredentialStore configures a git credential store file so that credentials
+// are available even when Git strips them from the URL (e.g., after HTTP redirects).
+// This is best-effort: if anything fails, it logs a warning and returns a no-op
+// cleanup, allowing the clone to proceed with URL-embedded credentials.
+func setupCredentialStore(uri *url.URL) func() {
+	noop := func() {}
+
+	if uri.Scheme != "https" && uri.Scheme != "http" {
+		return noop
+	}
+
+	// Use credentials from the URI (already set by setupAuthentication).
+	// Skip credential-store setup when the URI only has a username and no
+	// password/token, because that does not provide usable credentials and can
+	// still alter global git authentication behavior.
+	if uri.User == nil {
+		return noop
+	}
+	if _, hasPassword := uri.User.Password(); !hasPassword {
+		return noop
+	}
+
+	// Build the credential URL: scheme://user:token@host
+	credURL := &url.URL{
+		Scheme: uri.Scheme,
+		Host:   uri.Host,
+		User:   uri.User,
+	}
+
+	credContent := credURL.String() + "\n"
+
+	// Write the credentials file
+	credFile, err := os.CreateTemp(constants.DefaultTmpDirPath, "git-credentials-*")
+	if err != nil {
+		fmt.Printf("warn: could not create credential store file: %s\n", err)
+		return noop
+	}
+	credPath := credFile.Name()
+	credFile.Close()
+
+	if err := os.WriteFile(credPath, []byte(credContent), 0400); err != nil {
+		fmt.Printf("warn: could not write credential store: %s\n", err)
+		_ = os.Remove(credPath)
+		return noop
+	}
+
+	// Configure git to use the credential store
+	if err := runGit("config", "--global", "credential.helper", shellquote.Join("store", "--file", credPath)); err != nil {
+		fmt.Printf("warn: could not configure credential helper: %s\n", err)
+		_ = os.Remove(credPath)
+		return noop
+	}
+
+	return func() {
+		if err := runGit("config", "--global", "--unset", "credential.helper"); err != nil {
+			fmt.Printf("warn: could not unset credential helper: %s\n", err)
+		}
+
+		_ = os.Remove(credPath)
+	}
+}
+
+// cleanPaths prepares paths for sparse checkout
+func cleanPaths(rawPaths []string, cone bool) []string {
+	paths := make([]string, 0, len(rawPaths))
+	for _, p := range rawPaths {
+		p = filepath.Clean(p)
+		// In cone mode, remove leading slash except for root
+		if cone && p != "/" && strings.HasPrefix(p, "/") {
+			p = p[1:]
+		}
+		if p != "" && p != "." {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// performClone executes the git clone operation
+func performClone(uri, outputPath string, configArgs, authArgs []string, opts *CloneOptions, paths []string) error {
+	if len(paths) == 0 {
+		return performFullClone(uri, outputPath, configArgs, authArgs, opts)
+	}
+	return performSparseClone(uri, outputPath, configArgs, authArgs, opts, paths)
+}
+
+// performFullClone performs a full repository clone
+func performFullClone(uri, outputPath string, configArgs, authArgs []string, opts *CloneOptions) error {
+	ui.Debug("performing full checkout")
+
+	retryCount, retryDelay := opts.retrySettings()
+	args := []interface{}{configArgs, "clone"}
+	// Always clone without checkout so we can resolve `revision` (branch, tag, or commit)
+	// using the same fetch+checkout logic as the sparse path.
+	args = append(args, authArgs, "--depth", "1", "--no-checkout", opts.gitLogArgs(), uri, outputPath)
+
+	if err := runGitWithRetry(retryCount, retryDelay, args...); err != nil {
+		return err
+	}
+
+	if err := checkoutRevision(outputPath, configArgs, authArgs, opts); err != nil {
+		return fmt.Errorf("checking out revision: %w", err)
+	}
+
+	return nil
+}
+
+// performSparseClone performs a sparse repository clone
+func performSparseClone(uri, outputPath string, configArgs, authArgs []string, opts *CloneOptions, paths []string) error {
+	ui.Debug("performing sparse checkout")
+
+	if err := initializeSparseRepo(uri, outputPath, configArgs, authArgs, opts); err != nil {
+		return fmt.Errorf("initializing sparse repository: %w", err)
+	}
+
+	if err := configureSparseCheckout(outputPath, configArgs, paths, opts); err != nil {
+		return fmt.Errorf("configuring sparse checkout: %w", err)
+	}
+
+	if err := checkoutRevision(outputPath, configArgs, authArgs, opts); err != nil {
+		return fmt.Errorf("checking out revision: %w", err)
+	}
+
+	return nil
+}
+
+// initializeSparseRepo initializes a sparse git repository without checking out files
+func initializeSparseRepo(uri, outputPath string, configArgs, authArgs []string, opts *CloneOptions) error {
+	retryCount, retryDelay := opts.retrySettings()
+	args := []interface{}{configArgs, "clone"}
+	args = append(args, authArgs,
+		"--filter=blob:none",
+		"--no-checkout",
+		"--sparse",
+		"--depth", "1",
+		opts.gitLogArgs(),
+		uri, outputPath)
+
+	return runGitWithRetry(retryCount, retryDelay, args...)
+}
+
+// configureSparseCheckout sets up sparse checkout patterns
+func configureSparseCheckout(repoPath string, configArgs, paths []string, opts *CloneOptions) error {
+	retryCount, retryDelay := opts.retrySettings()
+	sparseArgs := []interface{}{"-C", repoPath}
+	sparseArgs = append(sparseArgs, configArgs, "sparse-checkout", "set")
+
+	if !opts.Cone {
+		sparseArgs = append(sparseArgs, "--no-cone")
+	}
+
+	sparseArgs = append(sparseArgs, paths)
+
+	return runGitWithRetry(retryCount, retryDelay, sparseArgs...)
+}
+
+// checkoutRevision checks out a specific revision or the default branch
+func checkoutRevision(repoPath string, configArgs, authArgs []string, opts *CloneOptions) error {
+	if opts.Revision == "" {
+		// For sparse checkout, we need to populate the working directory
+		// The sparse-checkout configuration will control which files are checked out
+		return runGit("-C", repoPath, configArgs, "read-tree", "-m", "-u", "HEAD")
+	}
+
+	if err := fetchRevision(repoPath, configArgs, authArgs, opts); err != nil {
+		return fmt.Errorf("fetching revision: %w", err)
+	}
+
+	if err := runGit("-C", repoPath, configArgs, "checkout", "FETCH_HEAD"); err != nil {
+		return fmt.Errorf("checking out FETCH_HEAD: %w", err)
+	}
+
+	// Create branch for non-commit references
+	// Skip branch creation if revision looks like a commit hash (40 hex chars)
+	if !isCommitHash(opts.Revision) {
+		if err := runGit("-C", repoPath, configArgs, "checkout", "-B", opts.Revision); err != nil {
+			return fmt.Errorf("creating branch: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// fetchRevision fetches a specific revision from the remote
+func fetchRevision(repoPath string, configArgs, authArgs []string, opts *CloneOptions) error {
+	retryCount, retryDelay := opts.retrySettings()
+	fetchArgs := []interface{}{"-C", repoPath}
+	fetchArgs = append(fetchArgs, configArgs, "fetch", authArgs, "--depth", "1", opts.gitLogArgs(), "origin", opts.Revision)
+
+	return runGitWithRetry(retryCount, retryDelay, fetchArgs...)
+}
+
+// isCommitHash checks if a string looks like a git commit hash
+func isCommitHash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// copyRepositoryContents copies repository contents from source to destination
+func copyRepositoryContents(src, dest string, opts *CloneOptions) error {
+	if !opts.isQuiet() {
+		fmt.Printf("📥 Moving the contents to %s...\n", dest)
+	}
+
+	return copy.Copy(src, dest, copy.Options{
+		OnError: func(srcPath, destPath string, err error) error {
+			if err != nil {
+				// Ignore chmod errors on mounted directories
+				if srcPath == src && strings.Contains(err.Error(), "chmod") {
+					return nil
+				}
+				fmt.Printf("warn: copying to %s: %s\n", destPath, err.Error())
+			}
+			return nil
+		},
+	})
+}
+
+// adjustFilePermissions ensures files have appropriate permissions
+func adjustFilePermissions(path string, opts *CloneOptions) error {
+	if !opts.isQuiet() {
+		fmt.Printf("📥 Adjusting access permissions...\n")
+	}
+
+	return filepath.WalkDir(path, func(filePath string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		mode := info.Mode()
+		// Ensure group has read/write permissions
+		if mode.Perm()&0o060 != 0o060 {
+			if err := os.Chmod(filePath, mode|0o060); err != nil {
+				// Log but don't fail on permission errors
+				fmt.Printf("warn: chmod %s: %s\n", filePath, err.Error())
+			}
+		}
+		return nil
+	})
+}
+
+// listDirectoryContents displays the contents of a directory
+func listDirectoryContents(path string, opts *CloneOptions) error {
+	if opts.isQuiet() {
+		return nil
+	}
+
+	fmt.Printf("🔎 Destination folder contains following files ...\n")
+
+	return filepath.Walk(path, func(name string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Bold directory names
+		if info.IsDir() {
+			fmt.Printf("\x1b[1m%s\x1b[0m\n", name)
+		} else {
+			fmt.Println(name)
+		}
+		return nil
+	})
+}
+
+type gitLabAccessClient interface {
+	GetGitAccess(context.Context, string, string) (*cloud.GetGitAccessResponse, error)
+}
+
+func setupGitLabAuthentication(ctx context.Context, uri *url.URL, opts *CloneOptions, client gitLabAccessClient) error {
+	access, err := client.GetGitAccess(ctx, uri.String(), opts.Revision)
+	if err != nil {
+		return fmt.Errorf("GitLab checkout access is unavailable; check the connection and update the control plane and Runner: %w", err)
+	}
+	relay, err := url.Parse(access.Url)
+	if err != nil || relay.Host == "" || (relay.Scheme != "https" && relay.Scheme != "http") || access.Token == "" {
+		return fmt.Errorf("invalid GitLab checkout access")
+	}
+	*uri = *relay
+	uri.User = url.UserPassword(access.Username, access.Token)
+	return nil
+}

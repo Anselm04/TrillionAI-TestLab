@@ -1,0 +1,17 @@
+package cdevent
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestCDEventLoader(t *testing.T) {
+	cdeventLoader, err := NewCDEventLoader("target", "", "", "", nil)
+	assert.NoError(t, err)
+
+	listeners, err := cdeventLoader.Load()
+
+	assert.Equal(t, 1, len(listeners))
+	assert.NoError(t, err)
+}

@@ -1,0 +1,253 @@
+-- name: StartExecution :exec
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status = 'assigned';
+
+-- name: StartExecutionResult :exec
+UPDATE test_workflow_results 
+SET status = 'starting'
+WHERE execution_id = @execution_id
+  AND status = 'assigned';
+
+-- name: PauseExecution :exec
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status = 'running';
+
+-- name: PauseExecutionResult :exec
+UPDATE test_workflow_results 
+SET status = 'pausing'
+WHERE execution_id = @execution_id
+  AND status = 'running';
+
+-- name: ResumeExecution :exec
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status = 'paused';
+
+-- name: ResumeExecutionResult :exec
+UPDATE test_workflow_results 
+SET status = 'resuming'
+WHERE execution_id = @execution_id
+  AND status = 'paused';
+
+-- name: AbortExecutionRunning :exec
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status IN ('starting', 'scheduling', 'running', 'paused', 'resuming');
+
+-- name: AbortExecutionRunningResult :exec
+UPDATE test_workflow_results 
+SET 
+    status = 'stopping',
+    predicted_status = 'aborted'
+WHERE execution_id = @execution_id
+  AND status IN ('starting', 'scheduling', 'running', 'paused', 'resuming');
+
+-- name: AbortExecutionQueued :exec
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status IN ('queued', 'assigned');
+
+-- name: AbortExecutionQueuedResult :exec
+UPDATE test_workflow_results 
+SET 
+    status = 'aborted',
+    predicted_status = 'aborted',
+    finished_at = @finished_at
+WHERE execution_id = @execution_id
+  AND status IN ('queued', 'assigned');
+
+-- name: CancelExecutionRunning :exec
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status IN ('starting', 'scheduling', 'running', 'paused', 'resuming');
+
+-- name: CancelExecutionRunningResult :exec
+UPDATE test_workflow_results 
+SET 
+    status = 'stopping',
+    predicted_status = 'canceled'
+WHERE execution_id = @execution_id
+  AND status IN ('starting', 'scheduling', 'running', 'paused', 'resuming');
+
+-- name: CancelExecutionQueued :exec
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status IN ('queued', 'assigned');
+
+-- name: CancelExecutionQueuedResult :exec
+UPDATE test_workflow_results 
+SET 
+    status = 'canceled',
+    predicted_status = 'canceled',
+    finished_at = @finished_at
+WHERE execution_id = @execution_id
+  AND status IN ('queued', 'assigned');
+
+-- name: ForceCancelExecution :exec
+-- Updates the execution status_at timestamp for executions in cancellable states
+UPDATE test_workflow_executions 
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = @execution_id
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status IN (
+    'queued', 'assigned', 'starting', 'scheduling', 'running', 
+    'pausing', 'paused', 'resuming', 'stopping'
+  );
+
+-- name: ForceCancelExecutionResult :exec
+-- Updates the main result status and timestamps
+UPDATE test_workflow_results 
+SET 
+    status = 'canceled',
+    predicted_status = 'canceled',
+    finished_at = @finished_at
+WHERE execution_id = @execution_id
+  AND status IN (
+    'queued', 'assigned', 'starting', 'scheduling', 'running', 
+    'pausing', 'paused', 'resuming', 'stopping'
+  );
+
+-- name: ForceCancelExecutionSteps :exec
+-- Cancels all steps that are not already terminated (passed/failed)
+-- Sets missing timestamps (queuedat, startedat, finishedat) to the provided time
+UPDATE test_workflow_results
+-- jsonb_object_agg returns NULL over zero rows, so a result that holds an
+-- empty steps object would lose the object. The COALESCE keeps it.
+SET steps = COALESCE((
+    SELECT jsonb_object_agg(
+        key,
+        CASE
+            -- If step is already passed or failed, keep it as is
+            WHEN value->>'status' IN ('passed', 'failed') THEN value
+            -- Otherwise, cancel it and update timestamps.
+            -- Both COALESCE branches must be jsonb; a text branch makes
+            -- Postgres reject the query with SQLSTATE 42804.
+            -- The new values go on the right side of || so they override
+            -- the old ones.
+            ELSE value || jsonb_build_object(
+                'status', 'canceled',
+                'queuedAt', COALESCE(
+                    to_jsonb(NULLIF(value->>'queuedAt', '0001-01-01T00:00:00Z')),
+                    to_jsonb(@finished_at::timestamptz)
+                ),
+                'startedAt', COALESCE(
+                    to_jsonb(NULLIF(value->>'startedAt', '0001-01-01T00:00:00Z')),
+                    to_jsonb(@finished_at::timestamptz)
+                ),
+                'finishedAt', COALESCE(
+                    to_jsonb(NULLIF(value->>'finishedAt', '0001-01-01T00:00:00Z')),
+                    to_jsonb(@finished_at::timestamptz)
+                )
+            )
+        END
+    )
+    FROM jsonb_each(COALESCE(steps, '{}'::jsonb))
+), '{}'::jsonb)
+WHERE execution_id = @execution_id
+  AND steps IS NOT NULL
+  AND jsonb_typeof(steps) = 'object';
+
+-- name: ForceCancelExecutionInitialization :exec
+-- Cancels the initialization step if it's not already terminated
+UPDATE test_workflow_results
+SET initialization = (
+    CASE
+        -- If initialization is already passed or failed, keep it as is
+        WHEN initialization->>'status' IN ('passed', 'failed') THEN initialization
+        -- Otherwise, cancel it and update timestamps.
+        -- Both COALESCE branches must be jsonb; a text branch makes
+        -- Postgres reject the query with SQLSTATE 42804.
+        -- The new values go on the right side of || so they override
+        -- the old ones.
+        ELSE initialization || jsonb_build_object(
+            'status', 'canceled',
+            'queuedAt', COALESCE(
+                to_jsonb(NULLIF(initialization->>'queuedAt', '0001-01-01T00:00:00Z')),
+                to_jsonb(@finished_at::timestamptz)
+            ),
+            'startedAt', COALESCE(
+                to_jsonb(NULLIF(initialization->>'startedAt', '0001-01-01T00:00:00Z')),
+                to_jsonb(@finished_at::timestamptz)
+            ),
+            'finishedAt', COALESCE(
+                to_jsonb(NULLIF(initialization->>'finishedAt', '0001-01-01T00:00:00Z')),
+                to_jsonb(@finished_at::timestamptz)
+            )
+        )
+    END
+)
+WHERE execution_id = @execution_id
+  AND initialization IS NOT NULL
+  AND jsonb_typeof(initialization) = 'object'
+  AND initialization->>'status' NOT IN ('passed', 'failed');
+
+-- name: GetExecutionForceCancel :one
+-- Helper query to verify the execution can be force-canceled
+SELECT 
+    e.id,
+    r.status
+FROM test_workflow_executions e
+INNER JOIN test_workflow_results r ON e.id = r.execution_id
+WHERE e.id = @execution_id
+  AND r.status IN (
+    'queued', 'assigned', 'starting', 'scheduling', 'running', 
+    'pausing', 'paused', 'resuming', 'stopping'
+  );
+
+-- name: ClaimExecutionsToStart :many
+-- Claims a dispatched batch, moving it from ASSIGNED to STARTING.
+--
+-- Returns the ids it actually claimed. The guard on status is what makes this
+-- safe: an execution aborted between the dispatch read and this write is left
+-- alone, and because the caller dispatches only what comes back here, the runner
+-- is never handed a row that is no longer startable.
+UPDATE test_workflow_results
+SET status = 'starting'
+WHERE execution_id = ANY(@execution_ids::text[])
+  AND status = 'assigned'
+RETURNING execution_id;
+
+-- name: StampExecutionsDispatched :exec
+-- Starts the dispatch lease on rows the claim above accepted.
+UPDATE test_workflow_executions
+SET status_at = @status_at
+WHERE id = ANY(@execution_ids::text[]);
+
+-- name: RefreshStartingExecutions :many
+-- Renews the dispatch lease on rows that were re-offered to the runner, so a row
+-- being retried is not offered again on the very next poll. Without this the
+-- retry interval collapses to the poll interval the moment the lease expires.
+--
+-- Returns the ids it renewed, for the same reason the claim does: a row that
+-- left STARTING in the meantime must not be dispatched.
+UPDATE test_workflow_executions
+SET status_at = @status_at
+FROM test_workflow_results r
+WHERE test_workflow_executions.id = ANY(@execution_ids::text[])
+  AND test_workflow_executions.id = r.execution_id
+  AND r.status = 'starting'
+RETURNING test_workflow_executions.id;

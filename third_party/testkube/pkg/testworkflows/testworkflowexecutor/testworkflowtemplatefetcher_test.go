@@ -1,0 +1,185 @@
+package testworkflowexecutor
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	gomock "go.uber.org/mock/gomock"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/newclients/testworkflowtemplateclient"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowresolver"
+)
+
+func TestTestWorkflowTemplateFetcher_ConcurrentAccess(t *testing.T) {
+	// Create mock controller
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Create mock client
+	mockClient := testworkflowtemplateclient.NewMockTestWorkflowTemplateClient(ctrl)
+
+	// Create test templates
+	templates := make([]*testkube.TestWorkflowTemplate, 10)
+	for i := 0; i < 10; i++ {
+		templates[i] = &testkube.TestWorkflowTemplate{
+			Name:        "template-" + string(rune('A'+i)),
+			Description: "description-" + string(rune('A'+i)),
+			Labels:      map[string]string{"key": "value"},
+			Spec:        &testkube.TestWorkflowTemplateSpec{},
+		}
+	}
+
+	// Setup mock expectations
+	for _, tmpl := range templates {
+		mockClient.EXPECT().
+			Get(gomock.Any(), "test-env", tmpl.Name).
+			Return(tmpl, nil).
+			AnyTimes()
+	}
+
+	// Create fetcher
+	fetcher := NewTestWorkflowTemplateFetcher(mockClient, "test-env")
+
+	// Test concurrent prefetch
+	t.Run("concurrent prefetch", func(t *testing.T) {
+		names := make(map[string]struct{})
+		for _, tmpl := range templates {
+			names[tmpl.Name] = struct{}{}
+		}
+
+		// Launch multiple goroutines to prefetch templates
+		err := fetcher.PrefetchMany(names)
+		assert.NoError(t, err)
+
+		// Verify all templates were fetched
+		for _, tmpl := range templates {
+			fetched, err := fetcher.Get(tmpl.Name)
+			assert.NoError(t, err)
+			assert.Equal(t, tmpl.Name, fetched.Name)
+			assert.Equal(t, tmpl.Description, fetched.Description)
+			assert.Equal(t, tmpl.Labels, fetched.Labels)
+		}
+	})
+
+	// Test concurrent get
+	t.Run("concurrent get", func(t *testing.T) {
+		names := make(map[string]struct{})
+		for _, tmpl := range templates {
+			names[tmpl.Name] = struct{}{}
+		}
+
+		// Launch multiple goroutines to get templates
+		results, err := fetcher.GetMany(names)
+		assert.NoError(t, err)
+		assert.Len(t, results, len(templates))
+
+		// Verify all templates were retrieved correctly
+		for _, tmpl := range templates {
+			fetched, ok := results[tmpl.Name]
+			assert.True(t, ok)
+			assert.Equal(t, tmpl.Name, fetched.Name)
+			assert.Equal(t, tmpl.Description, fetched.Description)
+			assert.Equal(t, tmpl.Labels, fetched.Labels)
+		}
+	})
+
+	// Test concurrent set and get
+	t.Run("concurrent set and get", func(t *testing.T) {
+		// Create a new template
+		newTmpl := &testkube.TestWorkflowTemplate{
+			Name:        "new-template",
+			Description: "new-description",
+			Labels:      map[string]string{"key": "value"},
+			Spec:        &testkube.TestWorkflowTemplateSpec{},
+		}
+
+		// Setup mock expectations for the new template
+		mockClient.EXPECT().
+			Get(gomock.Any(), "test-env", newTmpl.Name).
+			Return(newTmpl, nil).
+			AnyTimes()
+
+		// Launch goroutines to set and get the template concurrently
+		done := make(chan struct{})
+		go func() {
+			for i := 0; i < 100; i++ {
+				fetcher.SetCache(newTmpl.Name, newTmpl)
+			}
+			close(done)
+		}()
+
+		// Try to get the template while it's being set
+		for i := 0; i < 100; i++ {
+			fetched, err := fetcher.Get(newTmpl.Name)
+			assert.NoError(t, err)
+			assert.Equal(t, newTmpl.Name, fetched.Name)
+			assert.Equal(t, newTmpl.Description, fetched.Description)
+			assert.Equal(t, newTmpl.Labels, fetched.Labels)
+		}
+
+		<-done // Wait for set operations to complete
+	})
+
+	// Test forward slash get
+	t.Run("forward slash get", func(t *testing.T) {
+		// Create a new template
+		newTmpl := &testkube.TestWorkflowTemplate{
+			Name:        "new--template",
+			Description: "new-description",
+			Labels:      map[string]string{"key": "value"},
+			Spec:        &testkube.TestWorkflowTemplateSpec{},
+		}
+
+		// Setup mock expectations for the new template
+		mockClient.EXPECT().
+			Get(gomock.Any(), "test-env", newTmpl.Name).
+			Return(newTmpl, nil).
+			AnyTimes()
+
+		fetched, err := fetcher.Get(testworkflowresolver.GetDisplayTemplateName(newTmpl.Name))
+		assert.NoError(t, err)
+		assert.Equal(t, newTmpl.Name, fetched.Name)
+		assert.Equal(t, newTmpl.Description, fetched.Description)
+		assert.Equal(t, newTmpl.Labels, fetched.Labels)
+	})
+}
+
+func TestTestWorkflowTemplateFetcher_Prefetch_Error(t *testing.T) {
+	notFound := k8serrors.NewNotFound(schema.GroupResource{Group: "testworkflows.testkube.io", Resource: "testworkflowtemplates"}, "group--missing")
+	tests := []struct {
+		name     string
+		err      error
+		want     string
+		notFound bool
+	}{
+		{
+			name: "an error of the store names the template once",
+			err:  errors.New("record does not exist"),
+			want: `the template "group/missing": record does not exist`,
+		},
+		{
+			name:     "a template that Kubernetes does not find gives one sentence",
+			err:      notFound,
+			want:     `the template "group/missing" does not exist`,
+			notFound: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			client := testworkflowtemplateclient.NewMockTestWorkflowTemplateClient(ctrl)
+			client.EXPECT().
+				Get(gomock.Any(), "test-env", testworkflowresolver.GetInternalTemplateName("group/missing")).
+				Return(nil, tt.err)
+
+			err := NewTestWorkflowTemplateFetcher(client, "test-env").Prefetch("group/missing")
+
+			assert.EqualError(t, err, tt.want)
+			assert.Equal(t, tt.notFound, k8serrors.IsNotFound(err))
+		})
+	}
+}

@@ -1,0 +1,307 @@
+package client
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+
+	"github.com/pkg/errors"
+	"golang.org/x/oauth2"
+
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/oauth"
+	"github.com/kubeshop/testkube/pkg/problem"
+)
+
+type transport struct {
+	headers map[string]string
+	base    http.RoundTripper
+}
+
+// RoundTrip is a method to adjust http request
+func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, v := range t.headers {
+		req.Header.Add(k, v)
+	}
+
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+
+	return base.RoundTrip(req)
+}
+
+func ConfigureClient(client *http.Client, token *oauth2.Token, cloudApiKey string, headers map[string]string) {
+	hs := headers
+	if hs == nil {
+		hs = make(map[string]string)
+	}
+
+	if token != nil {
+		hs["Authorization"] = oauth.AuthorizationPrefix + " " + token.AccessToken
+	}
+
+	if cloudApiKey != "" {
+		hs["Authorization"] = "Bearer " + cloudApiKey
+	}
+
+	client.Transport = &transport{headers: hs, base: client.Transport}
+}
+
+// NewDirectClient returns new direct client
+func NewDirectClient[A All](httpClient *http.Client, apiURI, apiPathPrefix string) DirectClient[A] {
+	if apiPathPrefix == "" {
+		apiPathPrefix = "/" + Version
+	}
+
+	return DirectClient[A]{
+		client:        httpClient,
+		sseClient:     httpClient,
+		apiURI:        apiURI,
+		apiPathPrefix: apiPathPrefix,
+	}
+}
+
+// DirectClient implements direct client
+type DirectClient[A All] struct {
+	client        *http.Client
+	sseClient     *http.Client
+	apiURI        string
+	apiPathPrefix string
+}
+
+// baseExecute is base execute method
+func (t DirectClient[A]) baseExec(method, uri, resource string, body []byte, params map[string]string) (resp *http.Response, err error) {
+	var buffer io.Reader
+	if body != nil {
+		buffer = bytes.NewBuffer(body)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), method, uri, buffer)
+	if err != nil {
+		return resp, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	q := req.URL.Query()
+	for key, value := range params {
+		if value != "" {
+			q.Add(key, value)
+		}
+	}
+	req.URL.RawQuery = q.Encode()
+
+	resp, err = t.client.Do(req)
+	if err != nil {
+		return resp, err
+	}
+
+	if err = t.responseError(resp); err != nil {
+		return resp, fmt.Errorf("api/%s-%s returned error: %w", method, resource, err)
+	}
+
+	return resp, nil
+}
+
+func (t DirectClient[A]) WithSSEClient(client *http.Client) DirectClient[A] {
+	t.sseClient = client
+	return t
+}
+
+// Execute is a method to make an api call for a single object
+func (t DirectClient[A]) Execute(method, uri string, body []byte, params map[string]string) (result A, err error) {
+	resp, err := t.baseExec(method, uri, fmt.Sprintf("%T", result), body, params)
+	if err != nil {
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	return t.getFromResponse(resp)
+}
+
+// ExecuteMultiple is a method to make an api call for multiple objects
+func (t DirectClient[A]) ExecuteMultiple(method, uri string, body []byte, params map[string]string) (result []A, err error) {
+	resp, err := t.baseExec(method, uri, fmt.Sprintf("%T", result), body, params)
+	if err != nil {
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	return t.getFromResponses(resp)
+}
+
+// Delete is a method to make delete api call
+func (t DirectClient[A]) Delete(uri, selector string, isContentExpected bool) error {
+	return t.ExecuteMethod(http.MethodDelete, uri, map[string]string{"selector": selector}, isContentExpected)
+}
+
+func (t DirectClient[A]) ExecuteMethod(method, uri string, params map[string]string, isContentExpected bool) error {
+	resp, err := t.baseExec(method, uri, uri, nil, params)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if isContentExpected && resp.StatusCode != http.StatusNoContent {
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+
+		return fmt.Errorf("request returned error: %s", respBody)
+	}
+
+	return nil
+}
+
+// GetURI returns uri for api method
+func (t DirectClient[A]) GetURI(pathTemplate string, params ...interface{}) string {
+	path := fmt.Sprintf(pathTemplate, params...)
+	return fmt.Sprintf("%s%s%s", t.apiURI, t.apiPathPrefix, path)
+}
+
+// GetTestWorkflowExecutionNotifications returns logs stream from job pods, based on job pods logs
+func (t DirectClient[A]) GetTestWorkflowExecutionNotifications(uri string, notifications chan testkube.TestWorkflowExecutionNotification, options TestWorkflowExecutionNotificationsOptions) error {
+	req, err := http.NewRequestWithContext(options.RequestContext(), http.MethodGet, uri, nil)
+	if err != nil {
+		return err
+	}
+
+	if options.ResumeAfterSeqNo > 0 {
+		q := req.URL.Query()
+		q.Set("resumeAfterSeqNo", fmt.Sprintf("%d", options.ResumeAfterSeqNo))
+		req.URL.RawQuery = q.Encode()
+	}
+	if options.StreamID != "" {
+		q := req.URL.Query()
+		q.Set("streamId", options.StreamID)
+		req.URL.RawQuery = q.Encode()
+	}
+
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := t.sseClient.Do(req)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		defer close(notifications)
+		defer resp.Body.Close()
+
+		StreamToTestWorkflowExecutionNotificationsChannel(resp.Body, notifications)
+	}()
+
+	return nil
+}
+
+// GetFile returns file artifact
+func (t DirectClient[A]) GetFile(uri, fileName, destination string, params map[string][]string) (name string, err error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, uri, nil)
+	if err != nil {
+		return "", err
+	}
+
+	q := req.URL.Query()
+	for key, values := range params {
+		for _, value := range values {
+			if value != "" {
+				q.Add(key, value)
+			}
+		}
+	}
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return name, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode > 299 {
+		return name, &HTTPStatusError{StatusCode: resp.StatusCode}
+	}
+
+	target := filepath.Join(destination, fileName)
+	dir := filepath.Dir(target)
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		if err = os.MkdirAll(dir, os.ModePerm); err != nil {
+			return name, err
+		}
+	} else if err != nil {
+		return name, err
+	}
+
+	f, err := os.Create(target)
+	if err != nil {
+		return name, err
+	}
+
+	if _, err = io.Copy(f, resp.Body); err != nil {
+		return name, err
+	}
+
+	if err = t.responseError(resp); err != nil {
+		return name, fmt.Errorf("api/download-file returned error: %w", err)
+	}
+
+	return f.Name(), nil
+}
+
+// GetRawBody is a method to make an api call to return raw body
+func (t DirectClient[A]) GetRawBody(method, uri string, body []byte, params map[string]string) (result []byte, err error) {
+	resp, err := t.baseExec(method, uri, fmt.Sprintf("%T", result), body, params)
+	if err != nil {
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	return io.ReadAll(resp.Body)
+}
+
+// Validate is a method to make an api call to check errors
+func (t DirectClient[A]) Validate(method, uri string, body []byte, params map[string]string) error {
+	resp, err := t.baseExec(method, uri, uri, body, params)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
+func (t DirectClient[A]) getFromResponse(resp *http.Response) (result A, err error) {
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	return
+}
+
+func (t DirectClient[A]) getFromResponses(resp *http.Response) (result []A, err error) {
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	return
+}
+
+// responseError tries to lookup if response is of Problem type
+func (t DirectClient[A]) responseError(resp *http.Response) error {
+	if resp.StatusCode >= 400 {
+		var pr problem.Problem
+
+		bytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("can't get problem from api response: can't read response body %w", err)
+		}
+
+		err = json.Unmarshal(bytes, &pr)
+		if err != nil {
+			return fmt.Errorf("can't get problem from api response: %w, output: %s", err, string(bytes))
+		}
+
+		return fmt.Errorf("problem: %+v: %w", pr.Detail, &HTTPStatusError{StatusCode: resp.StatusCode})
+	}
+
+	return nil
+}

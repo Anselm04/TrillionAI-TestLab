@@ -1,0 +1,106 @@
+package constants
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path"
+
+	corev1 "k8s.io/api/core/v1"
+
+	testworkflowsv1 "github.com/kubeshop/testkube/api/testworkflows/v1"
+	"github.com/kubeshop/testkube/cmd/testworkflow-toolkit/env/config"
+	"github.com/kubeshop/testkube/pkg/version"
+)
+
+const (
+	DefaultInternalPath       = "/.tktw"
+	DefaultDataPath           = "/data"
+	DefaultTestkubePath       = "/testkube"
+	DefaultTerminationLogPath = "/dev/termination-log"
+	DefaultFsGroup            = int64(1001)
+	// TODO: move to the execution worker (?)
+	ResourceIdLabelName             = "testkube.io/resource"
+	RootResourceIdLabelName         = "testkube.io/root"
+	RunnerIdLabelName               = "testkube.io/runner"
+	GroupIdLabelName                = "testkube.io/contextGroup"
+	WorkflowNameLabelName           = "testkube.io/workflow-name"
+	SignatureAnnotationName         = "testkube.io/signature"
+	SignatureAnnotationFieldPath    = "metadata.annotations['" + SignatureAnnotationName + "']"
+	ScheduledAtAnnotationName       = "testkube.io/at"
+	InitializationTimeoutAnnotation = "testkube.io/timeouts.init"
+	SpecAnnotationName              = "testkube.io/spec"
+	SpecAnnotationFieldPath         = "metadata.annotations['" + SpecAnnotationName + "']"
+	InternalAnnotationName          = "testkube.io/config"
+	InternalAnnotationFieldPath     = "metadata.annotations['" + InternalAnnotationName + "']"
+	OpenSourceOperationErrorMessage = "operation is not available when running the Testkube Agent in the standalone mode"
+	RootOperationName               = "root"
+	AnnotationTerminationCode       = "testkube.io/termination-code"
+	AnnotationTerminationReason     = "testkube.io/termination-reason"
+	AnnotationTerminationActor      = "testkube.io/termination-actor"
+	AnnotationTerminationDetail     = "testkube.io/termination-detail"
+)
+
+var (
+	// These name locations inside a Linux container, so they are joined with `path` and
+	// not `filepath`. filepath answers for the host the processor runs on: on Windows it
+	// would build "\.tktw\bin\sh", which is not a path any container can execute, and
+	// which also stops the command rewiring in action/optimize.go from recognising the
+	// prefix it is meant to replace.
+	InternalBinPath        = path.Join(DefaultInternalPath, "bin")
+	DefaultShellPath       = path.Join(InternalBinPath, "sh")
+	DefaultInitPath        = path.Join(DefaultInternalPath, "init")
+	DefaultToolkitPath     = path.Join(DefaultInternalPath, "toolkit")
+	DefaultTransferDirPath = path.Join(DefaultInternalPath, "transfer")
+	DefaultTmpDirPath      = "/tmp"
+	DefaultTransferPort    = 60433
+	DefaultShellHeader     = "set -e\n"
+	DefaultContainerConfig = testworkflowsv1.ContainerConfig{
+		Image: DefaultInitImage,
+		Env: []testworkflowsv1.EnvVar{
+			{EnvVar: corev1.EnvVar{Name: "CI", Value: "1"}},
+		},
+	}
+	DefaultInitImage                             = getInitImage()
+	DefaultToolkitImage                          = getToolkitImage()
+	DefaultInitImageBusyboxBinaryPath            = "/.tktw-bin"
+	ErrOpenSourceExecuteOperationIsNotAvailable  = errors.New(`"execute" ` + OpenSourceOperationErrorMessage)
+	ErrOpenSourceParallelOperationIsNotAvailable = errors.New(`"parallel" ` + OpenSourceOperationErrorMessage)
+	ErrOpenSourceServicesOperationIsNotAvailable = errors.New(`"services" ` + OpenSourceOperationErrorMessage)
+)
+
+func getInitImage() string {
+	// Handle getter in the toolkit
+	if os.Getenv("TK_CFG") != "" {
+		return config.Config().Worker.InitImage
+	}
+
+	// Handle executor's getter
+	img := os.Getenv("TESTKUBE_TW_INIT_IMAGE")
+	if img == "" {
+		ver := version.Version
+		if ver == "" || ver == "dev" {
+			ver = "latest"
+		}
+		img = fmt.Sprintf("kubeshop/testkube-tw-init:%s", ver)
+	}
+	return img
+}
+
+func getToolkitImage() string {
+	// Handle getter in the toolkit
+	if os.Getenv("TK_CFG") != "" {
+		return config.Config().Worker.ToolkitImage
+	}
+
+	// Handle executor's getter
+	img := os.Getenv("TESTKUBE_TW_TOOLKIT_IMAGE")
+	if img == "" {
+		ver := version.Version
+		if ver == "" || ver == "dev" {
+			ver = "latest"
+		}
+		img = fmt.Sprintf("kubeshop/testkube-tw-toolkit:%s", ver)
+	}
+	return img
+}

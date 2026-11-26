@@ -1,0 +1,385 @@
+package config
+
+import (
+	"strings"
+	"time"
+
+	"github.com/kelseyhightower/envconfig"
+)
+
+type APIConfig struct {
+	// Server
+	APIServerPort     int    `envconfig:"APISERVER_PORT" default:"8088"`
+	APIServerConfig   string `envconfig:"APISERVER_CONFIG" default:""`
+	APIServerFullname string `envconfig:"APISERVER_FULLNAME" default:"testkube-api-server"`
+}
+
+type OSSControlPlaneConfig struct {
+	// Server
+	GRPCServerPort int `envconfig:"GRPCSERVER_PORT" default:"8089"`
+
+	// Mongo
+	APIMongoDSN               string `envconfig:"API_MONGO_DSN" default:""`
+	APIMongoAllowTLS          bool   `envconfig:"API_MONGO_ALLOW_TLS" default:"false"`
+	APIMongoSSLCert           string `envconfig:"API_MONGO_SSL_CERT" default:""`
+	APIMongoSSLCAFileKey      string `envconfig:"API_MONGO_SSL_CA_FILE_KEY" default:"sslCertificateAuthorityFile"`
+	APIMongoSSLClientFileKey  string `envconfig:"API_MONGO_SSL_CLIENT_FILE_KEY" default:"sslClientCertificateKeyFile"`
+	APIMongoSSLClientFilePass string `envconfig:"API_MONGO_SSL_CLIENT_FILE_PASS_KEY" default:"sslClientCertificateKeyFilePassword"`
+	APIMongoAllowDiskUse      bool   `envconfig:"API_MONGO_ALLOW_DISK_USE" default:"false"`
+	APIMongoDB                string `envconfig:"API_MONGO_DB" default:"testkube"`
+	APIMongoDBType            string `envconfig:"API_MONGO_DB_TYPE" default:"mongo"`
+	DisableMongoMigrations    bool   `envconfig:"DISABLE_MONGO_MIGRATIONS" default:"false"`
+	DisablePostgresMigrations bool   `envconfig:"DISABLE_POSTGRES_MIGRATIONS" default:"false"`
+	SkipDBCreation            bool   `envconfig:"SKIP_DB_CREATION" default:"false"`
+
+	// Postgres
+	APIPostgresDSN string `envconfig:"API_POSTGRES_DSN" default:""`
+
+	// Minio
+	StorageEndpoint   string `envconfig:"STORAGE_ENDPOINT" default:"localhost:9000"`
+	StorageBucket     string `envconfig:"STORAGE_BUCKET" default:"testkube-logs"`
+	StorageExpiration int    `envconfig:"STORAGE_EXPIRATION"`
+	// StorageCacheExpiration expires step dependency caches, in days. 0 disables it.
+	//
+	// One day, because a cache entry is disposable by construction: it is keyed on the
+	// contents of a lockfile, so an entry that is still wanted is rewritten by the next
+	// run that misses it, and one that is not wanted is dead weight in the bucket. Days
+	// are the finest granularity an object store's lifecycle offers, so 1 is the
+	// shortest expiry that can be expressed - it is 24 hours, not a rounding of one.
+	//
+	// A default is only safe because SetExpirationPolicies merges rather than replaces.
+	// Applying a lifecycle rewrites the bucket's configuration wholesale, so before that
+	// merge existed, defaulting this would have dropped the rules of any installation
+	// managing its bucket lifecycle elsewhere, by nothing but an upgrade. Do not give
+	// StorageExpiration a default on this reasoning: that rule is unfiltered and governs
+	// every object in the bucket, where this one is confined to the cache prefix.
+	StorageCacheExpiration       int    `envconfig:"STORAGE_CACHE_EXPIRATION" default:"1"`
+	StorageAccessKeyID           string `envconfig:"STORAGE_ACCESSKEYID" default:""`
+	StorageSecretAccessKey       string `envconfig:"STORAGE_SECRETACCESSKEY" default:""`
+	StorageRegion                string `envconfig:"STORAGE_REGION" default:""`
+	StorageToken                 string `envconfig:"STORAGE_TOKEN" default:""`
+	StorageSSL                   bool   `envconfig:"STORAGE_SSL" default:"false"`
+	StorageSkipVerify            bool   `envconfig:"STORAGE_SKIP_VERIFY" default:"false"`
+	StorageCertFile              string `envconfig:"STORAGE_CERT_FILE" default:""`
+	StorageKeyFile               string `envconfig:"STORAGE_KEY_FILE" default:""`
+	StorageCAFile                string `envconfig:"STORAGE_CA_FILE" default:""`
+	StorageUseVirtualHostedStyle bool   `envconfig:"STORAGE_USE_VIRTUAL_HOSTED_STYLE" default:"false"`
+
+	LogsBucket       string `envconfig:"LOGS_BUCKET" default:""`
+	LogsStorage      string `envconfig:"LOGS_STORAGE" default:""`
+	ArtifactsStorage string `envconfig:"ARTIFACTS_STORAGE" default:""`
+
+	// Execution dispatch
+	//
+	// The batch size bounds what one GetExecutionUpdates poll returns. Unbounded,
+	// a burst of workflows sharing a cron minute made a single poll exceed the
+	// runner's call deadline, and the resulting backoff stopped the backlog ever
+	// draining.
+	ExecutionDispatchBatchSize int `envconfig:"EXECUTION_DISPATCH_BATCH_SIZE" default:"25"`
+	// How long a dispatched execution may sit in STARTING before it is offered to
+	// a runner again. Must be shorter than ExecutionStartTimeout.
+	ExecutionRedispatchAfter time.Duration `envconfig:"EXECUTION_REDISPATCH_AFTER" default:"60s"`
+	// How long a dispatched execution may sit in STARTING before it is failed
+	// explicitly rather than left stuck while the control plane reports healthy.
+	ExecutionStartTimeout time.Duration `envconfig:"EXECUTION_START_TIMEOUT" default:"10m"`
+	// How often the reaper looks for executions that were never acknowledged.
+	ExecutionReaperInterval time.Duration `envconfig:"EXECUTION_REAPER_INTERVAL" default:"1m"`
+}
+
+type LegacyExecutorConfig struct {
+	// WhitelistedContainers is a list of containers from which logs should be collected.
+	WhitelistedContainers            []string      `envconfig:"WHITELISTED_CONTAINERS" default:"init,logs,scraper"`
+	ScrapperEnabled                  bool          `envconfig:"SCRAPPERENABLED" default:"false"`
+	JobServiceAccountName            string        `envconfig:"JOB_SERVICE_ACCOUNT_NAME" default:""`
+	JobTemplateFile                  string        `envconfig:"JOB_TEMPLATE_FILE" default:""`
+	DisableTestTriggers              bool          `envconfig:"DISABLE_TEST_TRIGGERS" default:"false"`
+	TestkubeDefaultExecutors         string        `envconfig:"TESTKUBE_DEFAULT_EXECUTORS" default:""`
+	TestkubeEnabledExecutors         string        `envconfig:"TESTKUBE_ENABLED_EXECUTORS" default:""`
+	TestkubeTemplateJob              string        `envconfig:"TESTKUBE_TEMPLATE_JOB" default:""`
+	TestkubeContainerTemplateJob     string        `envconfig:"TESTKUBE_CONTAINER_TEMPLATE_JOB" default:""`
+	TestkubeContainerTemplateScraper string        `envconfig:"TESTKUBE_CONTAINER_TEMPLATE_SCRAPER" default:""`
+	TestkubeContainerTemplatePVC     string        `envconfig:"TESTKUBE_CONTAINER_TEMPLATE_PVC" default:""`
+	TestkubeTemplateSlavePod         string        `envconfig:"TESTKUBE_TEMPLATE_SLAVE_POD" default:""`
+	TestkubeReadonlyExecutors        bool          `envconfig:"TESTKUBE_READONLY_EXECUTORS" default:"false"`
+	CompressArtifacts                bool          `envconfig:"COMPRESSARTIFACTS" default:"false"`
+	TestkubeDefaultStorageClassName  string        `envconfig:"TESTKUBE_DEFAULT_STORAGE_CLASS_NAME" default:""`
+	TestkubePodStartTimeout          time.Duration `envconfig:"TESTKUBE_POD_START_TIMEOUT" default:"30m"`
+
+	DisableReconciler bool `envconfig:"DISABLE_RECONCILER" default:"false"`
+}
+
+type NatsConfig struct {
+	NatsEmbedded         bool          `envconfig:"NATS_EMBEDDED" default:"false"`
+	NatsEmbeddedStoreDir string        `envconfig:"NATS_EMBEDDED_STORE_DIR" default:"/app/nats"`
+	NatsURI              string        `envconfig:"NATS_URI" default:"nats://localhost:4222"`
+	NatsSecure           bool          `envconfig:"NATS_SECURE" default:"false"`
+	NatsSkipVerify       bool          `envconfig:"NATS_SKIP_VERIFY" default:"false"`
+	NatsCertFile         string        `envconfig:"NATS_CERT_FILE" default:""`
+	NatsKeyFile          string        `envconfig:"NATS_KEY_FILE" default:""`
+	NatsCAFile           string        `envconfig:"NATS_CA_FILE" default:""`
+	NatsConnectTimeout   time.Duration `envconfig:"NATS_CONNECT_TIMEOUT" default:"5s"`
+}
+
+type KubernetesEventListenerConfig struct {
+	TestkubeWatcherNamespaces string `envconfig:"TESTKUBE_WATCHER_NAMESPACES" default:""`
+}
+
+type LogServerConfig struct {
+	LogServerGrpcAddress string `envconfig:"LOG_SERVER_GRPC_ADDRESS" default:":9090"`
+	LogServerSecure      bool   `envconfig:"LOG_SERVER_SECURE" default:"false"`
+	LogServerSkipVerify  bool   `envconfig:"LOG_SERVER_SKIP_VERIFY" default:"false"`
+	LogServerCertFile    string `envconfig:"LOG_SERVER_CERT_FILE" default:""`
+	LogServerKeyFile     string `envconfig:"LOG_SERVER_KEY_FILE" default:""`
+	LogServerCAFile      string `envconfig:"LOG_SERVER_CA_FILE" default:""`
+}
+
+type ControlPlaneConfig struct {
+	TestkubeProEnvID             string        `envconfig:"TESTKUBE_PRO_ENV_ID" default:""`
+	TestkubeProOrgID             string        `envconfig:"TESTKUBE_PRO_ORG_ID" default:""`
+	TestkubeProAgentID           string        `envconfig:"TESTKUBE_PRO_AGENT_ID" default:""`
+	TestkubeProAPIKey            string        `envconfig:"TESTKUBE_PRO_API_KEY" default:""`
+	TestkubeProURL               string        `envconfig:"TESTKUBE_PRO_URL" default:""`
+	TestkubeProAgentRegToken     string        `envconfig:"TESTKUBE_PRO_AGENT_REGISTRATION_TOKEN" default:""`
+	TestkubeProTLSInsecure       bool          `envconfig:"TESTKUBE_PRO_TLS_INSECURE" default:"false"`
+	TestkubeProSkipVerify        bool          `envconfig:"TESTKUBE_PRO_SKIP_VERIFY" default:"false"`
+	TestkubeProConnectionTimeout int           `envconfig:"TESTKUBE_PRO_CONNECTION_TIMEOUT" default:"10"`
+	TestkubeProCertFile          string        `envconfig:"TESTKUBE_PRO_CERT_FILE" default:""`
+	TestkubeProKeyFile           string        `envconfig:"TESTKUBE_PRO_KEY_FILE" default:""`
+	TestkubeProTLSSecret         string        `envconfig:"TESTKUBE_PRO_TLS_SECRET" default:""`
+	TestkubeProSendTimeout       time.Duration `envconfig:"TESTKUBE_PRO_SEND_TIMEOUT" default:"30s"`
+	TestkubeProRecvTimeout       time.Duration `envconfig:"TESTKUBE_PRO_RECV_TIMEOUT" default:"5m"`
+
+	// TestkubeProCAFile is meant to provide a custom CA when making a TLS connection to
+	// the agent API.
+	//
+	// Deprecated: Instead mount a CA file into a directory and specify the directory
+	// path with the SSL_CERT_DIR environment variable.
+	TestkubeProCAFile string `envconfig:"TESTKUBE_PRO_CA_FILE" default:""`
+}
+
+type DeprecatedControlPlaneConfig struct {
+	// DEPRECATED: Use TestkubeProAPIKey instead
+	TestkubeCloudAPIKey string `envconfig:"TESTKUBE_CLOUD_API_KEY" default:""`
+	// DEPRECATED: Use TestkubeProURL instead
+	TestkubeCloudURL string `envconfig:"TESTKUBE_CLOUD_URL" default:""`
+	// DEPRECATED: Use TestkubeProTLSInsecure instead
+	TestkubeCloudTLSInsecure bool `envconfig:"TESTKUBE_CLOUD_TLS_INSECURE" default:"false"`
+	// DEPRECATED: Use TestkubeProWorkerCount instead
+	TestkubeCloudWorkerCount int `envconfig:"TESTKUBE_CLOUD_WORKER_COUNT" default:"50"`
+	// DEPRECATED: Use TestkubeProLogStreamWorkerCount instead
+	TestkubeCloudLogStreamWorkerCount int `envconfig:"TESTKUBE_CLOUD_LOG_STREAM_WORKER_COUNT" default:"25"`
+	// DEPRECATED: Use TestkubeProEnvID instead
+	TestkubeCloudEnvID string `envconfig:"TESTKUBE_CLOUD_ENV_ID" default:""`
+	// DEPRECATED: Use TestkubeProOrgID instead
+	TestkubeCloudOrgID string `envconfig:"TESTKUBE_CLOUD_ORG_ID" default:""`
+	// DEPRECATED: Use TestkubeProMigrate instead
+	TestkubeCloudMigrate string `envconfig:"TESTKUBE_CLOUD_MIGRATE" default:"false"`
+}
+
+type SecretManagementConfig struct {
+	EnableSecretsEndpoint   bool   `envconfig:"ENABLE_SECRETS_ENDPOINT" default:"false"`
+	EnableListingAllSecrets bool   `envconfig:"ENABLE_LISTING_ALL_SECRETS" default:"false"`
+	SecretCreationPrefix    string `envconfig:"SECRET_CREATION_PREFIX" default:"testkube-"`
+}
+
+type ImageInspectorConfig struct {
+	TestkubeRegistry string `envconfig:"TESTKUBE_REGISTRY" default:""`
+	// InsecureRegistries is a comma-separated list of registry hostnames (host:port) that should
+	// be accessed over plain HTTP instead of HTTPS. Useful for local development with k3d/kind registries.
+	InsecureRegistries string `envconfig:"TESTKUBE_IMAGE_INSPECTOR_INSECURE_REGISTRIES" default:""`
+	// TestkubeImageCredentialsCacheTTL is the duration for which the image pull credentials should be cached provided as a Go duration string.
+	// If set to 0, the cache is disabled.
+	TestkubeImageCredentialsCacheTTL time.Duration `envconfig:"TESTKUBE_IMAGE_CREDENTIALS_CACHE_TTL" default:"30m"`
+	EnableImageDataPersistentCache   bool          `envconfig:"TESTKUBE_ENABLE_IMAGE_DATA_PERSISTENT_CACHE" default:"false"`
+	ImageDataPersistentCacheKey      string        `envconfig:"TESTKUBE_IMAGE_DATA_PERSISTENT_CACHE_KEY" default:"testkube-image-cache"`
+}
+
+type RunnerConfig struct {
+	DefaultExecutionNamespace string            `envconfig:"DEFAULT_EXECUTION_NAMESPACE" default:""`
+	DisableRunner             bool              `envconfig:"DISABLE_RUNNER" default:"false"`
+	SelfRegistrationSecret    string            `envconfig:"SELF_REGISTRATION_SECRET" default:""`
+	RunnerName                string            `envconfig:"RUNNER_NAME" default:""`
+	FloatingRunner            bool              `envconfig:"FLOATING_RUNNER" default:"false"`
+	EventLabels               map[string]string `envconfig:"EVENT_LABELS" default:""`
+	IsGlobal                  bool              `envconfig:"RUNNER_IS_GLOBAL" default:"false"`
+	RunnerGroup               string            `envconfig:"RUNNER_GROUP" default:""`
+	RunnerLabelsPrefix        string            `envconfig:"RUNNER_LABELS_PREFIX" default:"runner.testkube.io/"`
+
+	// Execution update polling
+	//
+	// PollInterval is a latency floor, not a throughput cap: one poll returns a
+	// whole batch. PollMaxBackoff is the ceiling on the retry delay after a failed
+	// poll - unbounded, it reached hours and stopped the runner consuming work at
+	// all.
+	RunnerPollInterval   time.Duration `envconfig:"RUNNER_POLL_INTERVAL" default:"1s"`
+	RunnerCallTimeout    time.Duration `envconfig:"RUNNER_CALL_TIMEOUT" default:"30s"`
+	RunnerPollMaxBackoff time.Duration `envconfig:"RUNNER_POLL_MAX_BACKOFF" default:"15s"`
+	// RunnerStartConcurrency bounds how many executions from one batch start at once.
+	RunnerStartConcurrency int `envconfig:"RUNNER_START_CONCURRENCY" default:"4"`
+	// RunnerPollStaleAfter is how long without a successful poll before the
+	// readiness check reports the runner as not ready. It must exceed
+	// RunnerCallTimeout + RunnerPollMaxBackoff so one slow poll cannot flap it.
+	RunnerPollStaleAfter time.Duration `envconfig:"RUNNER_POLL_STALE_AFTER" default:"2m"`
+}
+
+type GitOpsSyncConfig struct {
+	GitOpsSyncKubernetesToCloudEnabled bool `envconfig:"GITOPS_KUBERNETES_TO_CLOUD_ENABLED" default:"false"`
+	// GitOpsSyncControlPlaneResourcesEnabled also syncs the Control Plane resources (Insights
+	// Boards, the AI kinds and Test Bundles), which a GitOps runner syncs only when it is set.
+	GitOpsSyncControlPlaneResourcesEnabled bool `envconfig:"GITOPS_CONTROLPLANE_RESOURCES_ENABLED" default:"false"`
+}
+
+type CronJobConfig struct {
+	EnableCronJobs string `envconfig:"ENABLE_CRON_JOBS" default:""`
+}
+
+type WebhookConfig struct {
+	DisableWebhooks     bool `envconfig:"DISABLE_WEBHOOKS" default:"false"`
+	EnableCloudWebhooks bool `envconfig:"ENABLE_CLOUD_WEBHOOKS" default:"false"`
+	WebhookControlPlane bool `envconfig:"WEBHOOK_CONTROL_PLANE" default:"false"`
+}
+
+type Config struct {
+	APIConfig
+	OSSControlPlaneConfig
+	LegacyExecutorConfig
+	NatsConfig
+	KubernetesEventListenerConfig
+	LogServerConfig
+	ControlPlaneConfig
+	SecretManagementConfig
+	RunnerConfig
+	ImageInspectorConfig
+	GitOpsSyncConfig
+	CronJobConfig
+	WebhookConfig
+	// Tracing
+	TracingEnabled           bool    `envconfig:"TRACING_ENABLED" default:"false"`
+	OTLPEndpoint             string  `envconfig:"OTLP_ENDPOINT" default:"http://localhost:4317"`
+	OTLPServiceName          string  `envconfig:"OTLP_SERVICE_NAME" default:"testkube"`
+	TracingSampleRate        float64 `envconfig:"TRACING_SAMPLE_RATE" default:"1.0"`
+	DisableDefaultAgent      bool    `envconfig:"DISABLE_DEFAULT_AGENT" default:"false"`
+	TestkubeConfigDir        string  `envconfig:"TESTKUBE_CONFIG_DIR" default:"config"`
+	TestkubeAnalyticsEnabled bool    `envconfig:"TESTKUBE_ANALYTICS_ENABLED" default:"false"`
+	TestkubeNamespace        string  `envconfig:"TESTKUBE_NAMESPACE" default:"testkube"`
+	TestkubeLeaseName        string  `envconfig:"TESTKUBE_LEASE_NAME" default:""`
+
+	// Leader election / lease coordination (runner). Disable election for explicitly
+	// single-replica deployments; tune how often the lease is checked/renewed.
+	LeaderElectionDisabled bool          `envconfig:"LEADER_ELECTION_DISABLED" default:"false"`
+	LeaseCheckInterval     time.Duration `envconfig:"LEASE_CHECK_INTERVAL" default:"5s"`
+	// How often the event emitter leader reloads webhook/listener configuration.
+	EventEmitterReconcileInterval time.Duration `envconfig:"EVENT_EMITTER_RECONCILE_INTERVAL" default:"5s"`
+
+	TestkubeProWorkerCount          int      `envconfig:"TESTKUBE_PRO_WORKER_COUNT" default:"50"`
+	TestkubeProLogStreamWorkerCount int      `envconfig:"TESTKUBE_PRO_LOG_STREAM_WORKER_COUNT" default:"25"`
+	TestkubeProMigrate              string   `envconfig:"TESTKUBE_PRO_MIGRATE" default:"false"`
+	TestkubeProRunnerCustomCASecret string   `envconfig:"TESTKUBE_PRO_RUNNER_CUSTOM_CA_SECRET" default:""`
+	CDEventsTarget                  string   `envconfig:"CDEVENTS_TARGET" default:""`
+	TestkubeDashboardURI            string   `envconfig:"TESTKUBE_DASHBOARD_URI" default:""`
+	TestkubeClusterName             string   `envconfig:"TESTKUBE_CLUSTER_NAME" default:""`
+	TestkubeHelmchartVersion        string   `envconfig:"TESTKUBE_HELMCHART_VERSION" default:""`
+	DebugListenAddr                 string   `envconfig:"DEBUG_LISTEN_ADDR" default:"0.0.0.0:1337"`
+	EnableDebugServer               bool     `envconfig:"ENABLE_DEBUG_SERVER" default:"false"`
+	Debug                           bool     `envconfig:"DEBUG" default:"false"`
+	Trace                           bool     `envconfig:"TRACE" default:"false"`
+	DisableSecretCreation           bool     `envconfig:"DISABLE_SECRET_CREATION" default:"false"`
+	TestkubeExecutionNamespaces     string   `envconfig:"TESTKUBE_EXECUTION_NAMESPACES" default:""`
+	GlobalWorkflowTemplateName      string   `envconfig:"TESTKUBE_GLOBAL_WORKFLOW_TEMPLATE_NAME" default:""`
+	GlobalWorkflowTemplateInline    string   `envconfig:"TESTKUBE_GLOBAL_WORKFLOW_TEMPLATE_INLINE" default:""`
+	TransferEnvVariables            []string `envconfig:"TRANSFER_ENV_VARS" default:"GRPC_ENFORCE_ALPN_ENABLED"`
+	EnableK8sEvents                 bool     `envconfig:"ENABLE_K8S_EVENTS" default:"true"`
+	TestkubeDockerImageVersion      string   `envconfig:"TESTKUBE_DOCKER_IMAGE_VERSION" default:""`
+	DisableDeprecatedTests          bool     `envconfig:"DISABLE_DEPRECATED_TESTS" default:"false"`
+	AllowLowSecurityFields          bool     `envconfig:"ALLOW_LOW_SECURITY_FIELDS" default:"false"`
+	EnableK8sControllers            bool     `envconfig:"ENABLE_K8S_CONTROLLERS" default:"false"`
+	DisableOfficialTemplates        bool     `envconfig:"DISABLE_OFFICIAL_TEMPLATES" default:"false"`
+	TerminationLogPath              string   `envconfig:"TERMINATION_LOG_PATH" default:"/dev/termination-log"`
+	TestkubeEmptyDirSizeLimit       string   `envconfig:"TESTKUBE_EMPTYDIR_SIZE_LIMIT" default:""`
+	TestkubeDefaultImagePullPolicy  string   `envconfig:"TESTKUBE_DEFAULT_IMAGE_PULL_POLICY" default:""`
+	TestkubeDefaultRunnerCPURequest string   `envconfig:"TESTKUBE_DEFAULT_RUNNER_CPU_REQUEST" default:""`
+	TestkubeDefaultRunnerMemRequest string   `envconfig:"TESTKUBE_DEFAULT_RUNNER_MEMORY_REQUEST" default:""`
+	TestkubeDefaultRunnerCPULimit   string   `envconfig:"TESTKUBE_DEFAULT_RUNNER_CPU_LIMIT" default:""`
+	TestkubeDefaultRunnerMemLimit   string   `envconfig:"TESTKUBE_DEFAULT_RUNNER_MEMORY_LIMIT" default:""`
+
+	ExportArchiveMaxSize                     int           `envconfig:"EXPORT_ARCHIVE_MAX_SIZE" default:"104857600"`
+	FeatureCloudStorage                      bool          `envconfig:"FEATURE_CLOUD_STORAGE" default:"false"`
+	TestWorkflowLogArchiveRequired           bool          `envconfig:"TESTWORKFLOW_LOG_ARCHIVE_REQUIRED" default:"true"`
+	WorkflowLogsInsecureSkipTLSVerifyBackend bool          `envconfig:"TESTKUBE_WORKFLOW_LOGS_INSECURE_SKIP_TLS_VERIFY_BACKEND" default:"false"`
+	WorkflowLogsTLSRetryMaxAttempts          int           `envconfig:"TESTKUBE_WORKFLOW_LOGS_TLS_RETRY_MAX_ATTEMPTS" default:"7"`
+	WorkflowLogsTLSRetryInitialDelay         time.Duration `envconfig:"TESTKUBE_WORKFLOW_LOGS_TLS_RETRY_INITIAL_DELAY" default:"500ms"`
+	WorkflowLogsTLSRetryMaxDelay             time.Duration `envconfig:"TESTKUBE_WORKFLOW_LOGS_TLS_RETRY_MAX_DELAY" default:"30s"`
+	TestTriggerControlPlane                  bool          `envconfig:"TEST_TRIGGER_CONTROL_PLANE" default:"false"`
+	TestTriggerGitInformerRepoDepth          int           `envconfig:"TEST_TRIGGER_GIT_INFORMER_REPO_DEPTH" default:"500"`
+	TestTriggerGitInformerListTimeout        int           `envconfig:"TEST_TRIGGER_GIT_INFORMER_LIST_TIMEOUT" default:"15"`
+	TestTriggerGitInformerMaxCommitsScan     int           `envconfig:"TEST_TRIGGER_GIT_INFORMER_MAX_COMMITS_SCAN" default:"500"`
+	TestTriggerGitInformerReconcileInterval  time.Duration `envconfig:"TEST_TRIGGER_GIT_INFORMER_RECONCILE_INTERVAL" default:"1m"`
+	TestTriggerGitInformerPullRetries        int           `envconfig:"TEST_TRIGGER_GIT_INFORMER_PULL_RETRIES" default:"2"`
+	TestTriggerGitInformerPullRetryDelay     time.Duration `envconfig:"TEST_TRIGGER_GIT_INFORMER_PULL_RETRY_DELAY" default:"2s"`
+	ForceSuperAgentMode                      bool          `envconfig:"WARNING_UNSAFE_FORCE_SUPERAGENT_MODE" default:"false"`
+}
+
+type DeprecatedConfig struct {
+	DeprecatedControlPlaneConfig
+}
+
+func Get() (*Config, error) {
+	c := Config{}
+	if err := envconfig.Process("config", &c); err != nil {
+		return nil, err
+	}
+
+	deprecated := DeprecatedConfig{}
+	if err := envconfig.Process("config", &deprecated); err != nil {
+		return nil, err
+	}
+
+	if c.TestkubeProAgentID == "" && strings.HasPrefix(c.TestkubeProAPIKey, "tkcagnt_") {
+		c.TestkubeProAgentID = strings.Replace(c.TestkubeProEnvID, "tkcenv_", "tkcroot_", 1)
+	}
+
+	if strings.HasPrefix(c.TestkubeProAgentID, "tkcrun_") {
+		c.DisableWebhooks = true
+		c.DisableDeprecatedTests = true
+		c.DisableReconciler = true
+		c.DisableDefaultAgent = true
+		c.NatsEmbedded = true // we don't use it there
+		c.EnableCronJobs = "false"
+		c.EnableK8sControllers = false
+	} else if strings.HasPrefix(c.TestkubeProAgentID, "tkcsync_") {
+		c.DisableWebhooks = true
+		c.DisableDeprecatedTests = true
+		c.DisableReconciler = true
+		c.DisableDefaultAgent = true
+		c.NatsEmbedded = true // we don't use it there
+		c.EnableCronJobs = "false"
+		c.EnableK8sControllers = false
+	}
+
+	if c.TestkubeProAPIKey == "" && deprecated.TestkubeCloudAPIKey != "" {
+		c.TestkubeProAPIKey = deprecated.TestkubeCloudAPIKey
+	}
+	if c.TestkubeProURL == "" && deprecated.TestkubeCloudURL != "" {
+		c.TestkubeProURL = deprecated.TestkubeCloudURL
+	}
+	if !c.TestkubeProTLSInsecure && deprecated.TestkubeCloudTLSInsecure {
+		c.TestkubeProTLSInsecure = deprecated.TestkubeCloudTLSInsecure
+	}
+	if c.TestkubeProWorkerCount == 0 && deprecated.TestkubeCloudWorkerCount != 0 {
+		c.TestkubeProWorkerCount = deprecated.TestkubeCloudWorkerCount
+	}
+	if c.TestkubeProLogStreamWorkerCount == 0 && deprecated.TestkubeCloudLogStreamWorkerCount != 0 {
+		c.TestkubeProLogStreamWorkerCount = deprecated.TestkubeCloudLogStreamWorkerCount
+	}
+	if c.TestkubeProEnvID == "" && deprecated.TestkubeCloudEnvID != "" {
+		c.TestkubeProEnvID = deprecated.TestkubeCloudEnvID
+	}
+	if c.TestkubeProOrgID == "" && deprecated.TestkubeCloudOrgID != "" {
+		c.TestkubeProOrgID = deprecated.TestkubeCloudOrgID
+	}
+	if c.TestkubeProMigrate == "" && deprecated.TestkubeCloudMigrate != "" {
+		c.TestkubeProMigrate = deprecated.TestkubeCloudMigrate
+	}
+
+	return &c, nil
+}

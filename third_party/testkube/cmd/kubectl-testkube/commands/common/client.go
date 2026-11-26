@@ -1,0 +1,162 @@
+package common
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+
+	"github.com/spf13/cobra"
+
+	"github.com/kubeshop/testkube/cmd/kubectl-testkube/cloudlogin"
+	"github.com/kubeshop/testkube/cmd/kubectl-testkube/config"
+	"github.com/kubeshop/testkube/pkg/api/v1/client"
+	"github.com/kubeshop/testkube/pkg/ui"
+)
+
+const UserAgentCLI = "Testkube-CLI"
+
+// GetClient returns api client
+func GetClient(cmd *cobra.Command) (client.Client, string, error) {
+	return getClient(context.Background(), cmd, true)
+}
+
+// getClient builds the API client from the flags and the saved context. When
+// allowLogin is false, a failed token refresh is returned as an error instead
+// of starting a login, which shell completion relies on.
+func getClient(ctx context.Context, cmd *cobra.Command, allowLogin bool) (client.Client, string, error) {
+	namespace := cmd.Flag("namespace").Value.String()
+	apiURI := cmd.Flag("api-uri").Value.String()
+
+	headers, err := ResolveHeaders(cmd)
+	if err != nil {
+		return nil, "", err
+	}
+
+	options := client.Options{
+		Namespace: namespace,
+		ApiUri:    apiURI,
+		Headers:   headers,
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, "", fmt.Errorf("loading config file %w", err)
+	}
+
+	clientFlag := cmd.Flag("client")
+	clientType := cfg.ResolveClientType(clientFlag.Value.String(), clientFlag.Changed)
+
+	// set kubeconfig as default config type
+	if cfg.ContextType == "" {
+		cfg.ContextType = config.ContextTypeKubeconfig
+	}
+
+	if cfg.APIServerName == "" {
+		cfg.APIServerName = config.APIServerName
+	}
+
+	if cfg.APIServerPort == 0 {
+		cfg.APIServerPort = config.APIServerPort
+	}
+
+	options.Insecure = ResolveSkipTLS(cmd, &cfg)
+
+	options.APIServerName = cfg.APIServerName
+	options.APIServerPort = cfg.APIServerPort
+
+	if cfg.ContextType == config.ContextTypeCloud {
+		token := cfg.CloudContext.ApiKey
+
+		if cfg.CloudContext.ApiKey != "" && cfg.CloudContext.RefreshToken != "" {
+			newTokenType := cfg.CloudContext.TokenType
+			var refreshToken string
+			token, refreshToken, err = refreshUserToken(ctx, cfg, options.Insecure)
+			if err != nil {
+				if !allowLogin {
+					return nil, "", fmt.Errorf("token refresh failed: %w", err)
+				}
+				if cfg.CloudContext.TokenType == config.TokenTypeEmailLink {
+					// Don't auto-restart the email-link flow from inside an
+					// unrelated command — a 5-minute "check your inbox" wait
+					// mid-command is worse UX than a hard error. Surface the
+					// exact command to re-run, filling in the user's email
+					// from the stored ID token when we can recover it.
+					hint := "testkube pro login --email-link <email>"
+					if stored := cloudlogin.EmailFromIDToken(cfg.CloudContext.ApiKey); stored != "" {
+						hint = fmt.Sprintf("testkube pro login --email-link %s", stored)
+					}
+					return nil, "", fmt.Errorf("email-link token refresh failed; re-run `%s`: %w", hint, err)
+				}
+				if !ui.StdinIsInteractive() {
+					// Same reasoning as the email-link branch above, for the rest of the
+					// login methods: an unattended run cannot answer the method selector,
+					// so say what to re-run instead of asking a question nobody will see.
+					return nil, "", fmt.Errorf("token refresh failed and there is no terminal to log in from; "+
+						"re-run `testkube pro login` in an interactive shell: %w", err)
+				}
+				authURI := cfg.CloudContext.AuthUri
+				if authURI == "" {
+					authURI = fmt.Sprintf("%s/idp", cfg.CloudContext.ApiUri)
+				}
+				port := config.CallbackPort
+				if cfg.CloudContext.CallbackPort != 0 {
+					port = cfg.CloudContext.CallbackPort
+				}
+				newTokenType, token, refreshToken, err = LoginUser(authURI, cfg.CloudContext.ApiUri, cfg.CloudContext.CustomAuth, port, options.Insecure)
+				if err != nil {
+					return nil, "", fmt.Errorf("error logging in: %w", err)
+				}
+			}
+			if err := UpdateTokens(cfg, newTokenType, token, refreshToken); err != nil {
+				return nil, "", fmt.Errorf("error storing new token: %w", err)
+			}
+		}
+		clientType = string(client.ClientCloud)
+		options.CloudApiPathPrefix = client.CloudAgentPathPrefix(cfg.CloudContext.OrganizationId, cfg.CloudContext.EnvironmentId)
+		options.CloudApiKey = token
+		options.CloudEnvironment = cfg.CloudContext.EnvironmentId
+		options.CloudOrganization = cfg.CloudContext.OrganizationId
+		options.ApiUri = cfg.CloudContext.ApiUri
+	}
+
+	c, err := client.GetClient(client.ClientType(clientType), options)
+	if err != nil {
+		return nil, "", fmt.Errorf("setting up client type %w", err)
+	}
+
+	return c, namespace, nil
+}
+
+// ResolveHeaders returns the headers every request of the command carries:
+// the configured ones (`testkube config headers`, the --header default) or
+// those given with --header, and the CLI's User-Agent.
+func ResolveHeaders(cmd *cobra.Command) (map[string]string, error) {
+	flagged, err := cmd.Flags().GetStringToString("header")
+	if err != nil {
+		return nil, fmt.Errorf("parsing flag value %w", err)
+	}
+	headers := make(map[string]string, len(flagged)+1)
+	for k, v := range flagged {
+		headers[k] = v
+	}
+	headers["User-Agent"] = userAgent()
+	return headers, nil
+}
+
+func TelemetryUserID(cmd *cobra.Command, cfg *config.Data) string {
+	if cfg.CloudContext.EnvironmentId != "" {
+		return cfg.CloudContext.EnvironmentId
+	}
+	id := "command-cli-user"
+	client, _, err := GetClient(cmd)
+	if err == nil && client != nil {
+		if info, err := client.GetServerInfo(); err == nil && info.ClusterId != "" {
+			id = info.ClusterId
+		}
+	}
+	return id
+}
+
+func userAgent() string {
+	return fmt.Sprintf("%s/%s (%s; %s) Go/%s", UserAgentCLI, Version, runtime.GOOS, runtime.GOARCH, runtime.Version())
+}

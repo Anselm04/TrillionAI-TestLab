@@ -1,0 +1,5 @@
+Upstream: https://github.com/kubeshop/testkube
+Revision: 10a4281347cc677912a527bec34caa79880f87af
+MIT-default source snapshot; restricted or uncertain files and upstream automation excluded. Commercial reuse requires further license audit.
+Copied files: 2989
+Excluded files: 79

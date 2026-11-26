@@ -1,0 +1,61 @@
+name: Import Testkube upstream reference
+on:
+  push:
+    paths: ['.github/workflows/import-upstream.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: upstream-import
+  cancel-in-progress: false
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import licensed upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git clone --no-checkout --filter=blob:none https://github.com/kubeshop/testkube.git "$RUNNER_TEMP/upstream"
+          git -C "$RUNNER_TEMP/upstream" checkout --detach 10a4281347cc677912a527bec34caa79880f87af
+          python3 - <<'PY'
+          import os, pathlib, shutil, subprocess
+          src = pathlib.Path(os.environ['RUNNER_TEMP']) / 'upstream'
+          dst = pathlib.Path.cwd()
+          files = subprocess.check_output(['git','-C',str(src),'ls-files','-z']).decode().split('\0')
+          excluded = []
+          copied = 0
+          for name in filter(None, files):
+              p = src / name
+              if name.startswith('.github/workflows/') or p.is_symlink() or not p.is_file():
+                  excluded.append(name); continue
+              if name not in ('LICENSE','licenses/MIT.txt','licenses/TCL.txt'):
+                  header = p.read_bytes()[:8192].lower()
+                  if any(s in header for s in (b'testkube community license',b'spdx-license-identifier: tcl',b'license: tcl',b'licenses/tcl.txt')):
+                      excluded.append(name); continue
+                  restricted = False
+                  for parent in p.parents:
+                      if parent == src: break
+                      for license_name in ('LICENSE','LICENSE.txt','LICENSE.md'):
+                          local = parent / license_name
+                          if local.is_file() and b'testkube community license' in local.read_bytes().lower():
+                              restricted = True
+                  if restricted:
+                      excluded.append(name); continue
+              target = dst / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(p,target)
+              copied += 1
+          meta = dst / '.trillionai-reference'
+          meta.mkdir(exist_ok=True)
+          (meta/'SOURCE.txt').write_text('Upstream: https://github.com/kubeshop/testkube\nRevision: 10a4281347cc677912a527bec34caa79880f87af\nMIT-default source snapshot; restricted or uncertain files and upstream automation excluded. Commercial reuse requires further license audit.\nCopied files: '+str(copied)+'\nExcluded files: '+str(len(excluded))+'\n')
+          (meta/'EXCLUDED.txt').write_text('\n'.join(excluded)+'\n')
+          print('Copied:',copied,'Excluded:',len(excluded))
+          PY
+          git add -A
+          git commit -m "Import pinned Testkube reference source with license exclusions"
+          git push origin HEAD:main

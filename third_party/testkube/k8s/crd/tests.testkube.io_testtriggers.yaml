@@ -1,0 +1,1297 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: testtriggers.tests.testkube.io
+spec:
+  group: tests.testkube.io
+  names:
+    kind: TestTrigger
+    listKind: TestTriggerList
+    plural: testtriggers
+    singular: testtrigger
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.resource
+      name: Resource
+      type: string
+    - jsonPath: .spec.event
+      name: Event
+      type: string
+    - jsonPath: .spec.execution
+      name: Execution
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: TestTrigger is the Schema for the testtriggers API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TestTriggerSpec defines the desired state of TestTrigger
+            properties:
+              action:
+                description: Action represents what needs to be executed for selected
+                  Execution
+                enum:
+                - run
+                type: string
+              actionParameters:
+                description: supported action parameters for test triggers
+                properties:
+                  config:
+                    additionalProperties:
+                      type: string
+                    description: configuration to pass for the workflow
+                    type: object
+                  tags:
+                    additionalProperties:
+                      type: string
+                    description: test workflow execution tags
+                    type: object
+                  target:
+                    description: Target helps decide on which runner the execution
+                      is scheduled.
+                    properties:
+                      match:
+                        additionalProperties:
+                          items:
+                            type: string
+                          type: array
+                        type: object
+                      not:
+                        additionalProperties:
+                          items:
+                            type: string
+                          type: array
+                        type: object
+                      replicate:
+                        items:
+                          type: string
+                        type: array
+                      schedulerPolicy:
+                        description: SchedulerPolicy controls whether a targeted execution
+                          should be created.
+                        enum:
+                        - OnlyWhenMatches
+                        type: string
+                    type: object
+                type: object
+              concurrencyPolicy:
+                description: ConcurrencyPolicy defines concurrency policy for selected
+                  Execution
+                enum:
+                - allow
+                - forbid
+                - replace
+                type: string
+              conditionSpec:
+                description: What resource conditions should be matched
+                properties:
+                  conditions:
+                    description: list of test trigger conditions
+                    items:
+                      description: TestTriggerCondition is used for definition of
+                        the condition for test triggers
+                      properties:
+                        reason:
+                          description: test trigger condition reason
+                          type: string
+                        status:
+                          description: TestTriggerConditionStatuses defines condition
+                            statuses for test triggers
+                          enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                          type: string
+                        ttl:
+                          description: duration in seconds in the past from current
+                            time when the condition is still valid
+                          format: int32
+                          type: integer
+                        type:
+                          description: test trigger condition
+                          type: string
+                      required:
+                      - status
+                      - type
+                      type: object
+                    type: array
+                  delay:
+                    description: duration in seconds the test trigger waits between
+                      condition check
+                    format: int32
+                    type: integer
+                  timeout:
+                    description: duration in seconds the test trigger waits for conditions,
+                      until its stopped
+                    format: int32
+                    type: integer
+                type: object
+              contentSelector:
+                description: ContentSelector identifies which content should be watched
+                  for changes
+                properties:
+                  git:
+                    description: Git specifies a git repository to watch for changes
+                    properties:
+                      authType:
+                        description: Authorization type for the credentials
+                        enum:
+                        - basic
+                        - header
+                        - github
+                        - gitlab
+                        type: string
+                      branches:
+                        description: |-
+                          Branches is a list of branch name patterns to watch (glob supported, e.g. "main", "release/*").
+                          If empty, all branches are watched.
+                        items:
+                          type: string
+                        type: array
+                      branchesIgnore:
+                        description: |-
+                          BranchesIgnore is a list of branch name patterns to exclude (glob supported).
+                          Takes precedence over Branches when both match.
+                        items:
+                          type: string
+                        type: array
+                      paths:
+                        description: |-
+                          Paths is a list of file/directory paths to watch for changes (glob supported).
+                          If empty, all paths are watched.
+                        items:
+                          type: string
+                        type: array
+                      pathsIgnore:
+                        description: |-
+                          PathsIgnore is a list of file/directory path patterns to exclude (glob supported).
+                          Takes precedence over Paths when both match.
+                        items:
+                          type: string
+                        type: array
+                      pullRequest:
+                        description: |-
+                          PullRequest specifies pull request trigger configuration.
+                          When set, the informer uses the GitHub API to poll for PR events.
+                        properties:
+                          branches:
+                            description: |-
+                              Branches is a list of base branch name patterns to watch (glob supported).
+                              If empty, PRs targeting any base branch are watched.
+                            items:
+                              type: string
+                            type: array
+                          branchesIgnore:
+                            description: |-
+                              BranchesIgnore is a list of base branch name patterns to exclude (glob supported).
+                              Takes precedence over Branches when both match.
+                            items:
+                              type: string
+                            type: array
+                          types:
+                            description: |-
+                              Types is a list of PR activity types to watch (e.g. "opened", "synchronize", "reopened", "closed").
+                              If empty, all types are watched.
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      sshKey:
+                        description: |-
+                          Plain text SSH private key to fetch with.
+                          Warning: this stores sensitive credentials directly in the CRD spec, which may be persisted in etcd
+                          and exposed through Kubernetes API reads or logs. Prefer SshKeyFrom instead.
+                        type: string
+                      sshKeyFrom:
+                        description: External SSH private key to fetch with. Preferred
+                          for sensitive credentials.
+                        properties:
+                          configMapKeyRef:
+                            description: Selects a key of a ConfigMap.
+                            properties:
+                              key:
+                                description: The key to select.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap or its
+                                  key must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fieldRef:
+                            description: |-
+                              Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                              spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                            properties:
+                              apiVersion:
+                                description: Version of the schema the FieldPath is
+                                  written in terms of, defaults to "v1".
+                                type: string
+                              fieldPath:
+                                description: Path of the field to select in the specified
+                                  API version.
+                                type: string
+                            required:
+                            - fieldPath
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fileKeyRef:
+                            description: |-
+                              FileKeyRef selects a key of the env file.
+                              Requires the EnvFiles feature gate to be enabled.
+                            properties:
+                              key:
+                                description: |-
+                                  The key within the env file. An invalid key will prevent the pod from starting.
+                                  The keys defined within a source may consist of any printable ASCII characters except '='.
+                                  During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                type: string
+                              optional:
+                                default: false
+                                description: |-
+                                  Specify whether the file or its key must be defined. If the file or key
+                                  does not exist, then the env var is not published.
+                                  If optional is set to true and the specified key does not exist,
+                                  the environment variable will not be set in the Pod's containers.
+
+                                  If optional is set to false and the specified key does not exist,
+                                  an error will be returned during Pod creation.
+                                type: boolean
+                              path:
+                                description: |-
+                                  The path within the volume from which to select the file.
+                                  Must be relative and may not contain the '..' path or start with '..'.
+                                type: string
+                              volumeName:
+                                description: The name of the volume mount containing
+                                  the env file.
+                                type: string
+                            required:
+                            - key
+                            - path
+                            - volumeName
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          resourceFieldRef:
+                            description: |-
+                              Selects a resource of the container: only resources limits and requests
+                              (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                            properties:
+                              containerName:
+                                description: 'Container name: required for volumes,
+                                  optional for env vars'
+                                type: string
+                              divisor:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Specifies the output format of the exposed
+                                  resources, defaults to "1"
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              resource:
+                                description: 'Required: resource to select'
+                                type: string
+                            required:
+                            - resource
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          secretKeyRef:
+                            description: Selects a key of a secret in the pod's namespace
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                      tags:
+                        description: |-
+                          Tags is a list of tag name patterns to watch (glob supported, e.g. "v*", "v1.*").
+                          If empty, tag events are not watched unless Branches is also empty (watch all).
+                        items:
+                          type: string
+                        type: array
+                      tagsIgnore:
+                        description: |-
+                          TagsIgnore is a list of tag name patterns to exclude (glob supported).
+                          Takes precedence over Tags when both match.
+                        items:
+                          type: string
+                        type: array
+                      token:
+                        description: |-
+                          Plain text token to fetch with.
+                          Warning: this stores sensitive credentials directly in the CRD spec, which may be persisted in etcd
+                          and exposed through Kubernetes API reads or logs. Prefer TokenFrom instead.
+                        type: string
+                      tokenFrom:
+                        description: External token to fetch with. Preferred for sensitive
+                          credentials.
+                        properties:
+                          configMapKeyRef:
+                            description: Selects a key of a ConfigMap.
+                            properties:
+                              key:
+                                description: The key to select.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap or its
+                                  key must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fieldRef:
+                            description: |-
+                              Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                              spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                            properties:
+                              apiVersion:
+                                description: Version of the schema the FieldPath is
+                                  written in terms of, defaults to "v1".
+                                type: string
+                              fieldPath:
+                                description: Path of the field to select in the specified
+                                  API version.
+                                type: string
+                            required:
+                            - fieldPath
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fileKeyRef:
+                            description: |-
+                              FileKeyRef selects a key of the env file.
+                              Requires the EnvFiles feature gate to be enabled.
+                            properties:
+                              key:
+                                description: |-
+                                  The key within the env file. An invalid key will prevent the pod from starting.
+                                  The keys defined within a source may consist of any printable ASCII characters except '='.
+                                  During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                type: string
+                              optional:
+                                default: false
+                                description: |-
+                                  Specify whether the file or its key must be defined. If the file or key
+                                  does not exist, then the env var is not published.
+                                  If optional is set to true and the specified key does not exist,
+                                  the environment variable will not be set in the Pod's containers.
+
+                                  If optional is set to false and the specified key does not exist,
+                                  an error will be returned during Pod creation.
+                                type: boolean
+                              path:
+                                description: |-
+                                  The path within the volume from which to select the file.
+                                  Must be relative and may not contain the '..' path or start with '..'.
+                                type: string
+                              volumeName:
+                                description: The name of the volume mount containing
+                                  the env file.
+                                type: string
+                            required:
+                            - key
+                            - path
+                            - volumeName
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          resourceFieldRef:
+                            description: |-
+                              Selects a resource of the container: only resources limits and requests
+                              (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                            properties:
+                              containerName:
+                                description: 'Container name: required for volumes,
+                                  optional for env vars'
+                                type: string
+                              divisor:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Specifies the output format of the exposed
+                                  resources, defaults to "1"
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              resource:
+                                description: 'Required: resource to select'
+                                type: string
+                            required:
+                            - resource
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          secretKeyRef:
+                            description: Selects a key of a secret in the pod's namespace
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                      uri:
+                        description: URI of the git repository
+                        type: string
+                      username:
+                        description: Plain text username to fetch with
+                        type: string
+                      usernameFrom:
+                        description: External username to fetch with
+                        properties:
+                          configMapKeyRef:
+                            description: Selects a key of a ConfigMap.
+                            properties:
+                              key:
+                                description: The key to select.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap or its
+                                  key must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fieldRef:
+                            description: |-
+                              Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                              spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                            properties:
+                              apiVersion:
+                                description: Version of the schema the FieldPath is
+                                  written in terms of, defaults to "v1".
+                                type: string
+                              fieldPath:
+                                description: Path of the field to select in the specified
+                                  API version.
+                                type: string
+                            required:
+                            - fieldPath
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fileKeyRef:
+                            description: |-
+                              FileKeyRef selects a key of the env file.
+                              Requires the EnvFiles feature gate to be enabled.
+                            properties:
+                              key:
+                                description: |-
+                                  The key within the env file. An invalid key will prevent the pod from starting.
+                                  The keys defined within a source may consist of any printable ASCII characters except '='.
+                                  During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                type: string
+                              optional:
+                                default: false
+                                description: |-
+                                  Specify whether the file or its key must be defined. If the file or key
+                                  does not exist, then the env var is not published.
+                                  If optional is set to true and the specified key does not exist,
+                                  the environment variable will not be set in the Pod's containers.
+
+                                  If optional is set to false and the specified key does not exist,
+                                  an error will be returned during Pod creation.
+                                type: boolean
+                              path:
+                                description: |-
+                                  The path within the volume from which to select the file.
+                                  Must be relative and may not contain the '..' path or start with '..'.
+                                type: string
+                              volumeName:
+                                description: The name of the volume mount containing
+                                  the env file.
+                                type: string
+                            required:
+                            - key
+                            - path
+                            - volumeName
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          resourceFieldRef:
+                            description: |-
+                              Selects a resource of the container: only resources limits and requests
+                              (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                            properties:
+                              containerName:
+                                description: 'Container name: required for volumes,
+                                  optional for env vars'
+                                type: string
+                              divisor:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Specifies the output format of the exposed
+                                  resources, defaults to "1"
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              resource:
+                                description: 'Required: resource to select'
+                                type: string
+                            required:
+                            - resource
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          secretKeyRef:
+                            description: Selects a key of a secret in the pod's namespace
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                    required:
+                    - uri
+                    type: object
+                  http:
+                    description: HTTP specifies an HTTP endpoint to poll for changes.
+                      Mutually exclusive with Git.
+                    properties:
+                      body:
+                        description: Body sent with every request, e.g. for a POST
+                          or GraphQL endpoint
+                        type: string
+                      expectedStatus:
+                        description: |-
+                          ExpectedStatus lists the status codes of a successful poll, 200 by default.
+                          A response with any other code is a failed poll, never a change.
+                        items:
+                          format: int32
+                          type: integer
+                        type: array
+                      fireOnFirstObservation:
+                        description: |-
+                          FireOnFirstObservation fires the trigger on the first successful poll. By default the first
+                          poll only records the value to compare later polls against.
+                        type: boolean
+                      headers:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Headers sent with every request.
+                          Warning: these are stored in plain text in the trigger spec. Prefer HeadersFrom for credentials.
+                        type: object
+                      headersFrom:
+                        description: |-
+                          HeadersFrom sends headers whose values are read from a Secret or ConfigMap in the trigger's
+                          namespace on every poll. Preferred for credentials.
+                        items:
+                          description: TestTriggerContentHTTPHeaderSource is a request
+                            header whose value is read from a Secret or ConfigMap
+                          properties:
+                            name:
+                              description: Name of the header
+                              type: string
+                            valueFrom:
+                              description: ValueFrom is the source of the header value
+                              properties:
+                                configMapKeyRef:
+                                  description: Selects a key of a ConfigMap.
+                                  properties:
+                                    key:
+                                      description: The key to select.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the ConfigMap or
+                                        its key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                fieldRef:
+                                  description: |-
+                                    Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                    spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                                  properties:
+                                    apiVersion:
+                                      description: Version of the schema the FieldPath
+                                        is written in terms of, defaults to "v1".
+                                      type: string
+                                    fieldPath:
+                                      description: Path of the field to select in
+                                        the specified API version.
+                                      type: string
+                                  required:
+                                  - fieldPath
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                fileKeyRef:
+                                  description: |-
+                                    FileKeyRef selects a key of the env file.
+                                    Requires the EnvFiles feature gate to be enabled.
+                                  properties:
+                                    key:
+                                      description: |-
+                                        The key within the env file. An invalid key will prevent the pod from starting.
+                                        The keys defined within a source may consist of any printable ASCII characters except '='.
+                                        During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                      type: string
+                                    optional:
+                                      default: false
+                                      description: |-
+                                        Specify whether the file or its key must be defined. If the file or key
+                                        does not exist, then the env var is not published.
+                                        If optional is set to true and the specified key does not exist,
+                                        the environment variable will not be set in the Pod's containers.
+
+                                        If optional is set to false and the specified key does not exist,
+                                        an error will be returned during Pod creation.
+                                      type: boolean
+                                    path:
+                                      description: |-
+                                        The path within the volume from which to select the file.
+                                        Must be relative and may not contain the '..' path or start with '..'.
+                                      type: string
+                                    volumeName:
+                                      description: The name of the volume mount containing
+                                        the env file.
+                                      type: string
+                                  required:
+                                  - key
+                                  - path
+                                  - volumeName
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                resourceFieldRef:
+                                  description: |-
+                                    Selects a resource of the container: only resources limits and requests
+                                    (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                                  properties:
+                                    containerName:
+                                      description: 'Container name: required for volumes,
+                                        optional for env vars'
+                                      type: string
+                                    divisor:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: Specifies the output format of
+                                        the exposed resources, defaults to "1"
+                                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                      x-kubernetes-int-or-string: true
+                                    resource:
+                                      description: 'Required: resource to select'
+                                      type: string
+                                  required:
+                                  - resource
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                secretKeyRef:
+                                  description: Selects a key of a secret in the pod's
+                                    namespace
+                                  properties:
+                                    key:
+                                      description: The key of the secret to select
+                                        from.  Must be a valid secret key.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the Secret or its
+                                        key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                              type: object
+                          required:
+                          - name
+                          - valueFrom
+                          type: object
+                        type: array
+                      insecureSkipVerify:
+                        description: InsecureSkipVerify skips the verification of
+                          the server's TLS certificate
+                        type: boolean
+                      interval:
+                        description: Interval between polls, 1m by default and at
+                          least 10s
+                        format: duration
+                        type: string
+                      method:
+                        description: Method is the HTTP method of the request, GET
+                          by default
+                        enum:
+                        - GET
+                        - HEAD
+                        - POST
+                        - PUT
+                        - PATCH
+                        - DELETE
+                        - OPTIONS
+                        type: string
+                      select:
+                        description: Select chooses the part of the response that
+                          is watched. When omitted, the whole body is.
+                        properties:
+                          header:
+                            description: Header is the name of a response header whose
+                              value is watched (e.g. ETag)
+                            type: string
+                          jsonPath:
+                            description: |-
+                              JSONPath is a dot-path into the JSON response body (e.g. ".data.version").
+                              An object or array is compared by its JSON encoding.
+                            type: string
+                        type: object
+                      timeout:
+                        description: Timeout of one request, 10s by default
+                        format: duration
+                        type: string
+                      url:
+                        description: URL of the endpoint to poll (http or https)
+                        type: string
+                    required:
+                    - url
+                    type: object
+                type: object
+              delay:
+                description: Delay is a duration string which specifies how long should
+                  the test be delayed after a trigger is matched
+                format: duration
+                type: string
+              disabled:
+                description: whether test trigger is disabled
+                type: boolean
+              event:
+                description: |-
+                  On which Event for a Resource should an Action be triggered.
+                  Exactly one of Event or Events must be specified.
+                enum:
+                - created
+                - modified
+                - deleted
+                - git-push
+                - git-tag-push
+                - git-pull-request
+                - http-changed
+                - deployment-scale-update
+                - deployment-image-update
+                - deployment-env-update
+                - deployment-containers-modified
+                - deployment-generation-modified
+                - deployment-resource-modified
+                - event-start-test
+                - event-end-test-success
+                - event-end-test-failed
+                - event-end-test-aborted
+                - event-end-test-timeout
+                - event-start-testsuite
+                - event-end-testsuite-success
+                - event-end-testsuite-failed
+                - event-end-testsuite-aborted
+                - event-end-testsuite-timeout
+                - event-queue-testworkflow
+                - event-start-testworkflow
+                - event-end-testworkflow-success
+                - event-end-testworkflow-failed
+                - event-end-testworkflow-aborted
+                - event-end-testworkflow-canceled
+                - event-end-testworkflow-not-passed
+                - event-created
+                - event-updated
+                - event-deleted
+                type: string
+              events:
+                description: |-
+                  Events is a list of Events for a Resource on which an Action should be triggered;
+                  the trigger fires when any event in the list occurs.
+                  Exactly one of Event or Events must be specified.
+                items:
+                  description: TestTriggerEvent defines event for test triggers
+                  enum:
+                  - created
+                  - modified
+                  - deleted
+                  - git-push
+                  - git-tag-push
+                  - git-pull-request
+                  - http-changed
+                  - deployment-scale-update
+                  - deployment-image-update
+                  - deployment-env-update
+                  - deployment-containers-modified
+                  - deployment-generation-modified
+                  - deployment-resource-modified
+                  - event-start-test
+                  - event-end-test-success
+                  - event-end-test-failed
+                  - event-end-test-aborted
+                  - event-end-test-timeout
+                  - event-start-testsuite
+                  - event-end-testsuite-success
+                  - event-end-testsuite-failed
+                  - event-end-testsuite-aborted
+                  - event-end-testsuite-timeout
+                  - event-queue-testworkflow
+                  - event-start-testworkflow
+                  - event-end-testworkflow-success
+                  - event-end-testworkflow-failed
+                  - event-end-testworkflow-aborted
+                  - event-end-testworkflow-canceled
+                  - event-end-testworkflow-not-passed
+                  - event-created
+                  - event-updated
+                  - event-deleted
+                  type: string
+                type: array
+              execution:
+                description: Execution identifies for which test execution should
+                  an Action be executed
+                enum:
+                - test
+                - testsuite
+                - testworkflow
+                type: string
+              listener:
+                description: |-
+                  Listener selects which listener agent(s) watch the cluster for matching
+                  events and fire the trigger, using the same match selector as the action
+                  target (e.g. match.id). When empty, every listener-capable agent in the
+                  environment that picks up the CRD will fire it (broadcast). Required when
+                  match[] is set, because schema-aware match validation is only sound when
+                  the firing listener is known at create time: the picker and validator ran
+                  against that listener's cluster-resources snapshot, and a different
+                  listener may have a different CRD inventory or RBAC.
+                properties:
+                  match:
+                    additionalProperties:
+                      items:
+                        type: string
+                      type: array
+                    type: object
+                  not:
+                    additionalProperties:
+                      items:
+                        type: string
+                      type: array
+                    type: object
+                  replicate:
+                    items:
+                      type: string
+                    type: array
+                  schedulerPolicy:
+                    description: SchedulerPolicy controls whether a targeted execution
+                      should be created.
+                    enum:
+                    - OnlyWhenMatches
+                    type: string
+                type: object
+              match:
+                description: |-
+                  Match filters which object changes fire the trigger.
+                  Each entry evaluates a dot-path on the watched object (e.g. ".status.currentStepIndex",
+                  ".spec.template.spec.containers.0.image") with an operator. All entries must pass (AND logic).
+                items:
+                  description: WorkflowTriggerFieldCondition defines a field-level
+                    match condition.
+                  properties:
+                    operator:
+                      description: Operator is the comparison operator.
+                      enum:
+                      - equals
+                      - not_equals
+                      - exists
+                      - not_exists
+                      - changed
+                      - changed_to
+                      - changed_from
+                      type: string
+                    path:
+                      description: |-
+                        Path is a dot-path to a field on the K8s object, e.g. ".spec.replicas",
+                        ".spec.template.spec.containers.0.image". Array elements use .N syntax.
+                      type: string
+                    value:
+                      description: Value to compare against. Required for equals,
+                        not_equals, changed_to, changed_from.
+                      type: string
+                  required:
+                  - operator
+                  - path
+                  type: object
+                type: array
+              probeSpec:
+                description: What resource probes should be matched
+                properties:
+                  delay:
+                    description: duration in seconds the test trigger waits between
+                      probes
+                    format: int32
+                    type: integer
+                  probes:
+                    description: list of test trigger probes
+                    items:
+                      description: TestTriggerProbe is used for definition of the
+                        probe for test triggers
+                      properties:
+                        headers:
+                          additionalProperties:
+                            type: string
+                          description: test trigger condition probe headers to submit
+                          type: object
+                        host:
+                          description: test trigger condition probe host, default
+                            is pod ip or service name
+                          type: string
+                        path:
+                          description: test trigger condition probe path to check,
+                            default is /
+                          type: string
+                        port:
+                          description: test trigger condition probe port to connect
+                          format: int32
+                          type: integer
+                        scheme:
+                          description: test trigger condition probe scheme to connect
+                            to host, default is http
+                          type: string
+                      type: object
+                    type: array
+                  timeout:
+                    description: duration in seconds the test trigger waits for probes,
+                      until its stopped
+                    format: int32
+                    type: integer
+                type: object
+              resource:
+                description: For which Resource do we monitor Event which triggers
+                  an Action on certain conditions
+                enum:
+                - pod
+                - deployment
+                - statefulset
+                - daemonset
+                - service
+                - ingress
+                - event
+                - configmap
+                - content
+                type: string
+              resourceRef:
+                description: |-
+                  ResourceRef specifies a resource to watch by Group/Version/Kind.
+                  Works for any K8s resource including CRDs. Mutually exclusive with Resource.
+                properties:
+                  group:
+                    description: Group is the API group (empty for core resources
+                      like Pod, Service).
+                    type: string
+                  kind:
+                    description: Kind is the resource kind (e.g. Deployment, KafkaTopic).
+                    type: string
+                  version:
+                    description: Version is the API version.
+                    type: string
+                required:
+                - kind
+                type: object
+              resourceSelector:
+                description: ResourceSelector identifies which Kubernetes Objects
+                  should be watched
+                properties:
+                  labelSelector:
+                    description: LabelSelector is used to identify a group of Kubernetes
+                      Objects based on their metadata labels
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  name:
+                    description: Name selector is used to identify a Kubernetes Object
+                      based on the metadata name
+                    type: string
+                  nameRegex:
+                    description: kubernetes resource name regex
+                    type: string
+                  namespace:
+                    description: Namespace of the Kubernetes object
+                    type: string
+                  namespaceRegex:
+                    description: kubernetes resource namespace regex
+                    type: string
+                type: object
+              selector:
+                description: Selector is used to select events which trigger an action
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              testSelector:
+                description: TestSelector identifies on which Testkube Kubernetes
+                  Objects an Action should be taken
+                properties:
+                  labelSelector:
+                    description: LabelSelector is used to identify a group of Kubernetes
+                      Objects based on their metadata labels
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  name:
+                    description: Name selector is used to identify a Kubernetes Object
+                      based on the metadata name
+                    type: string
+                  nameRegex:
+                    description: kubernetes resource name regex
+                    type: string
+                  namespace:
+                    description: Namespace of the Kubernetes object
+                    type: string
+                  namespaceRegex:
+                    description: kubernetes resource namespace regex
+                    type: string
+                type: object
+            required:
+            - action
+            - execution
+            - testSelector
+            type: object
+          status:
+            description: TestTriggerStatus defines the observed state of TestTrigger
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

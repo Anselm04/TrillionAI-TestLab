@@ -1,0 +1,67 @@
+### Go template
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.tgz
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+testCoverage.html
+unit-tests.xml
+unit-tests.json
+integration-tests.xml
+integration-tests.json
+
+# Dependency directories (remove the comment below to include it)
+vendor/
+
+# Node modulesz
+**/node_modules
+
+/gen
+
+# Local binary directories
+bin
+
+### JetBrains
+.idea
+*.iml
+
+.DS_Store
+bin/
+site
+
+/artifacts
+movie.mp4
+/tmp
+/linux
+/windows
+/darwin
+/dist
+.vscode
+
+# Local
+build/_local/values.dev.yaml
+build/_local/agent-server
+build/_local/kubectl-testkube
+build/_local/tilt-registry-values.yaml
+tilt-values.local.yaml
+tilt_modules/
+.tiltbuild/
+depot-build-meta.json
+
+# Environment files
+.env
+
+# GitHub Actions temporary Google credentials
+gha-creds-*.json
+.cursor/settings.json
+
+# Local security scan reports (make security-scan)
+.security-scan/

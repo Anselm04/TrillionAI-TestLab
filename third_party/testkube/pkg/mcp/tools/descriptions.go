@@ -1,0 +1,206 @@
+package tools
+
+const (
+	WorkflowNameDescription = `The name of the workflow. Workflow names are lowercase alphanumeric with dashes 
+(e.g., 'my-workflow', 'api-tests'). This uniquely identifies a TestWorkflow within the organization.`
+
+	ExecutionIdDescription = `The unique execution ID in MongoDB ObjectID format (24 hex chars, e.g., '67d2cdbc351aecb2720afdf2').
+Use lookup_execution_id if you only have an execution name.`
+
+	ExecutionNameDescription = `The name of the execution (e.g., 'my-workflow-123'). Execution names follow
+the pattern of workflow name plus a numeric suffix. Use lookup_execution_id to get the ID from a name.`
+
+	PageDescription = "Page number for pagination (default: 0)"
+
+	PageSizeDescription = "Number of items to return per page (default: 10, max: 100)"
+
+	TextSearchDescription = `Text search filter for names or descriptions. Can use space-separated words
+to find items containing all terms`
+
+	SelectorDescription = `Filter workflows by label using key=value format. For single label use 'key=value',
+for multiple labels use comma-separated format 'key1=value1,key2=value2' (e.g., 'tool=cypress,env=prod').
+Note: filters workflow-level labels, not execution tags — use tagSelector for execution tags.`
+
+	TagSelectorDescription = `Filter executions by tag using key=value format. For single tag use 'key=value',
+for multiple tags use comma-separated format 'key1=value1,key2=value2' (e.g., 'type=suite,env=prod').
+Note: filters execution-level tags (set via update_execution_tags), not workflow labels — use selector for workflow labels.`
+
+	StatusDescription = `Filter by execution status. Available statuses: 'queued', 'running', 'passed', 
+'failed', 'skipped', 'aborted', 'canceled', 'timeout', 'paused'`
+
+	ResourceGroupDescription = "Filter by resource group using the group slug (e.g., 'demo-resource-group', 'accounting-tests'). Use the list_resource_groups tool to discover available groups"
+
+	SinceDescription = "Filter executions created after this time (ISO 8601 format)"
+
+	StartDateDescription = `Filter items on or after this time. Accepts a date (YYYY-MM-DD, e.g., '2024-01-15')
+or an RFC 3339 timestamp (e.g., '2024-01-15T13:00:00Z').`
+
+	EndDateDescription = `Filter items on or before this time. Accepts a date (YYYY-MM-DD, e.g., '2024-01-31')
+or an RFC 3339 timestamp (e.g., '2024-01-31T16:00:00Z'). Combine with startDate for date ranges.`
+
+	FilenameDescription = "The name of the artifact file to retrieve"
+
+	// Workflow tool descriptions
+	ListWorkflowsDescription               = "List Testkube workflows with optional filtering by resource group, selector, status, and text search. Returns workflow names, descriptions, and execution status."
+	CreateWorkflowDescription              = "Create a new TestWorkflow from a YAML definition. The workflow is immediately available for execution after creation."
+	GetWorkflowDefinitionDescription       = "Get the YAML definition of a specific Testkube workflow. Returns the complete specification including steps, configuration schema, and metadata."
+	GetWorkflowDescription                 = "Get detailed workflow information including execution history, health metrics, and current status."
+	GetWorkflowMetricsDescription          = "Get execution metrics for a workflow: execution statistics, health scores, pass rates, and performance data. Use to analyze workflow reliability over time."
+	GetWorkflowExecutionMetricsDescription = "Get raw resource metrics (CPU, memory, disk, network) for a single workflow execution as time-series data. Use for deep-dive debugging of a specific run. Requires workflowName and executionId."
+	GetWorkflowResourceHistoryDescription  = "Analyze resource consumption patterns (CPU, memory, disk, network) across recent executions of a workflow. Computes cross-execution statistics (mean, min, max, stdDev), detects trends, and identifies outliers. Use to investigate growing resource usage or find abnormal runs. Requires workflowName."
+	RunWorkflowDescription                 = "Run a TestWorkflow with optional configuration parameters and agent targeting. Use get_workflow_definition first to discover available config parameters. Use list_agents to discover available target agents."
+	UpdateWorkflowDescription              = "Update an existing TestWorkflow with a new YAML definition. The workflow is updated immediately and available for execution with the new configuration."
+
+	// Execution tool descriptions
+	FetchExecutionLogsDescription           = "Retrieve logs from a test workflow execution. Default returns last 100 lines. Use grep to search the full log in any case; over 100 matches, you get the last 100. Always paginate in 100-line chunks. For a failed execution, start with step set to the statusDetails.step that get_execution_info returns. Line numbers in results count from the top of the whole log, also when a step is set. For parallel workflows with workers, call get_execution_info first to get valid worker refs (do not use step refs)."
+	ListExecutionsDescription               = "List test workflow executions with filtering by workflow, status, date range, labels, tags, or text search. Returns execution summaries including status, duration, and metadata. Use to discover recent runs or find specific executions."
+	GetExecutionInfoDescription             = "Get detailed information about a specific workflow execution: status, timing, results, configuration, and worker instances. An execution that did not pass also carries statusDetails, which names the layer that failed, a reason code for the cause, and the step that holds it. Requires executionId. workflowName is optional for disambiguation."
+	GetExecutionInfoWorkflowNameDescription = "Optional workflow name for scoping an execution name lookup. Safe to omit when you have an execution ID."
+	LookupExecutionIdDescription            = "Resolve an execution name (e.g., 'my-workflow-123') to its execution ID. Use when you have an execution name but need the ID for other tools."
+	WaitForExecutionsDescription            = "Wait for a list of workflow executions to complete. Returns the final status of all executions. Use for synchronizing dependent workflows."
+	AbortWorkflowExecutionDescription       = "Abort a running workflow execution. Stops the execution and marks it as aborted. Use for cancelling long-running or stuck executions."
+	UpdateExecutionTagsDescription          = "Update tags on a workflow execution. Uses replace semantics: provided tags completely replace existing tags. Send empty map {} to clear all tags. Tags are key-value pairs for categorization and filtering."
+
+	// Additional parameter descriptions
+	ExecutionIdsDescription   = "Comma-separated list of execution IDs to wait for (e.g., 'exec1,exec2,exec3')."
+	TimeoutMinutesDescription = "Maximum time to wait in minutes before timing out (default: 30). Set to 0 for no timeout."
+
+	// Artifact tool descriptions
+	ListArtifactsDescription = "List all artifacts (files, reports, logs) generated by a workflow execution. Returns artifact names, sizes, and status. Use to discover available outputs before reading specific artifacts."
+	ReadArtifactDescription  = "Read content from an artifact file produced by a workflow execution. Default returns first 100 lines (max 200 per request). Always paginate in 100-200 line chunks. For binary artifacts, returns a summary instead of content."
+
+	// Other tool descriptions
+	BuildDashboardUrlDescription  = "Build dashboard URLs for Testkube workflows and executions. Supports deep linking to a specific step in the execution log view via stepRef."
+	ListLabelsDescription         = "List all workflow labels and their values in the environment. Use to discover available filters for selector parameters in other tools."
+	ListResourceGroupsDescription = "List available resource groups in the organization. Use to discover group slugs for filtering workflows and executions."
+	ListAgentsDescription         = "List available agents in the organization for workflow execution targeting. Returns agent names, types, capabilities, labels, and status. Use before run_workflow to discover target agents."
+
+	// Query tool descriptions
+	QueryWorkflowsDescription = `Query workflow definitions in bulk using JSONPath.
+Fetches workflow YAML and extracts fields matching the expression.
+Use to find workflows by configuration patterns, image references, or step structure across all workflows.`
+
+	QueryExecutionsDescription = `Query execution records across multiple workflows using JSONPath.
+Fetches execution data and extracts fields matching the expression.
+Use for cross-workflow analysis: find all failed executions, compare durations, or extract specific fields in bulk.`
+
+	// WorkflowTemplate tool descriptions
+	TemplateNameDescription = `The name of the workflow template. Template names are lowercase alphanumeric with dashes 
+(e.g., 'my-template', 'official--k6--v1'). This uniquely identifies a TestWorkflowTemplate within the environment.`
+
+	ListWorkflowTemplatesDescription         = "List all TestWorkflowTemplates with optional label filtering. Returns template names, descriptions, and labels."
+	GetWorkflowTemplateDefinitionDescription = "Get the YAML definition of a specific TestWorkflowTemplate. Returns the complete template specification including steps, config schema, and metadata."
+	CreateWorkflowTemplateDescription        = "Create a new TestWorkflowTemplate from a YAML definition. The template is immediately available for use by workflows."
+	UpdateWorkflowTemplateDescription        = "Update an existing TestWorkflowTemplate with a new YAML definition. Workflows using the template pick up the changes."
+
+	// Schema tool descriptions
+	GetWorkflowSchemaDescription  = "Get the YAML schema for TestWorkflow definitions. Returns all available fields, their types, and descriptions. Use to understand workflow structure when creating or querying workflows."
+	GetExecutionSchemaDescription = "Get the YAML schema for TestWorkflowExecution data. Returns all available fields, their types, and descriptions. Use to understand execution data structure when analyzing results."
+
+	// Insight (ingested metrics) tool descriptions
+	ListInsightSeriesDescription = `Discover the granular insight metric series ingested from test/performance reports.
+Each series is one metric for one workflow (and optional identity, e.g. a specific k6 request name or JUnit test case), identified by a seriesId.
+Series are parsed from k6, jmeter, artillery, junit and influx reports. Use this to find which metrics exist and to get the seriesId and metricKey to feed into get_insight_metric_series.
+Scoped to the current environment.`
+
+	ListInsightMetricKeysDescription = `List the distinct granular insight metric keys available (e.g. 'http_req_duration_p95_ms', 'response_time_percentile_2_ms', 'test_duration_ms').
+A lightweight vocabulary for discovery; use list_insight_series when you also need seriesId, source, workflow or identity. Scoped to the current environment.`
+
+	GetInsightMetricSeriesDescription = `Query a granular insight metric as a time series (values and trends over time) for the current environment.
+Provide either a metricKey via 'measure' (values are aggregated across all matching series) or one or more 'seriesId' values (comma-separated). If both are set, seriesId wins.
+Discover metric keys with list_insight_metric_keys and series/seriesIds with list_insight_series.
+Besides granular metric keys, 'measure' also accepts the canonical cross-tool measures 'latency_p95_ms', 'throughput_rps' and 'errors_rate' (these may not appear in the series catalog).
+Use 'segment' to break the series down by workflow, status, or an identity field key. Data defaults to the last 7 days unless startDate/endDate are given.`
+
+	ListInsightExecutionsDescription = `List the workflow executions that produced a given insight metric, most recent first.
+Use after get_insight_metric_series to drill from a metric value/trend down to the concrete executions behind it, then pivot to get_execution_info or fetch_execution_logs.
+Filter with the same 'measure'/identity/workflow/status/tag/date filters as get_insight_metric_series. Scoped to the current environment.`
+
+	// Insight tool parameter descriptions
+	InsightSourceDescription     = "Filter by the report source that produced the series: 'k6', 'jmeter', 'artillery', 'junit', 'influx', or 'canonical'."
+	InsightMetricKeyDescription  = "Filter by an exact metric key (e.g. 'http_req_duration_p95_ms', 'test_duration_ms'). Discover valid keys with list_insight_metric_keys."
+	InsightQueryDescription      = "Free-text search across series metadata (metric key, workflow, identity)."
+	InsightMeasureDescription    = `The metric to query. A granular metric key (e.g. 'http_req_duration_p95_ms') or a canonical cross-tool measure ('latency_p95_ms', 'throughput_rps', 'errors_rate'). Discover granular keys with list_insight_metric_keys.`
+	InsightSeriesIdDescription   = "Comma-separated granular insight series IDs to include (from list_insight_series). When set, takes precedence over 'measure'."
+	InsightAggregateDescription  = "How to aggregate values within each time bucket: 'avg' (default), 'sum', 'min', 'max', or 'count'."
+	InsightSegmentDescription    = "Break the series down by a property: 'workflow', 'status', or any stable identity field key (e.g. 'testcase', 'scenario', 'route')."
+	InsightMaxSamplesDescription = "Maximum number of time-series points to return per segment (default: 50, max: 500). Increase for finer detail, decrease for a more compact response."
+	InsightWorkflowDescription   = "Filter to a single workflow by name."
+
+	InsightIdentityFiltersDescription = `JSON object of granular insight series identity filters. Keys are identity field names and values are arrays of strings. ` +
+		`Plain strings match exactly (case-insensitive); strings prefixed with "~" match partially via regex. ` +
+		`Multiple identity keys are combined with AND; multiple values for the same key are combined with OR. ` +
+		`Example: {"testcase":["login"],"route":["~^/api/"]}.`
+	InsightTagFilterDescription = `Filter executions by tag. Tag values may contain commas, so multiple predicates must be passed as a JSON array, e.g. ["release=2026.07,hotfix","bug"]. ` +
+		`A plain (non-JSON) string is treated as a single predicate verbatim. Each predicate supports key=value (exact), key=~pattern (regex), or a bare key (existence).`
+)
+
+// Insights board tool descriptions
+const (
+	boardSessionNote = ` Boards belong to the organization, not to one environment. Requires a signed-in user session: API tokens cannot use boards.`
+
+	ListBoardsDescription = `List the Insights boards visible to you: boards shared with the organization and your private boards.
+A board is a saved dashboard of reports (charts) over execution data. Use get_board to see a board's reports and render_board to get their numbers.` + boardSessionNote
+
+	GetBoardDescription = `Get an Insights board: its details, its reports (id, kind, name, params) in the order the dashboard shows them, and its layout as rows of report IDs.
+Reports listed under 'unplaced' are on the board but not in its layout, so the dashboard does not show them.` + boardSessionNote
+
+	CreateBoardDescription = `Create an empty Insights board. Shared with the organization by default; set private to keep it to yourself.
+Add reports to it with add_board_report.` + boardSessionNote
+
+	UpdateBoardDescription = `Change an Insights board's name, description, slug, visibility or layout. Fields you omit keep their current values.
+To change the reports on a board, use add_board_report, update_board_report and remove_board_report instead.` + boardSessionNote
+
+	AddBoardReportDescription = `Add a report (chart) to an Insights board. The report is placed on a new row at the bottom of the board, and its ID is returned.
+Kinds: 'pass-fail' (pass/fail ratio or counts over time), 'executions' (execution count or average duration grouped by status, failure type or reason, workflow, label or tag),
+'workflows' (per-workflow execution, failure and duration summary), 'time-series' (any measure over time, optionally segmented - including performance and resource metrics).
+Params you omit get the same defaults the dashboard gives a new report.` + boardSessionNote
+
+	UpdateBoardReportDescription = `Change a report on an Insights board: its name, description, kind or params. Params are merged into the current ones unless replaceParams is true.
+The report keeps its place on the board.` + boardSessionNote
+
+	RemoveBoardReportDescription = `Remove a report from an Insights board. This cannot be undone. Only call it when the user asked to remove this report.` + boardSessionNote
+
+	DeleteBoardDescription = `Permanently delete an Insights board and all of its reports. This cannot be undone.
+Only call it when the user explicitly asked to delete this board. Deleting a shared board requires an organization admin; a private board can be deleted by its owner.` + boardSessionNote
+
+	RenderBoardDescription = `Render an Insights board: run the query of each report the dashboard shows and return its numbers, together with the query and date range used. Reports the board's layout leaves out are listed under 'unplaced' and not rendered, unless one is asked for with reportId.
+A report that fails is returned with an error without failing the others. Relative durations end at the start of tomorrow in timeZone, as the dashboard ends them at the viewer's local midnight - pass the user's time zone to get the numbers they see.` + boardSessionNote
+
+	// Board tool parameter descriptions
+	BoardIdDescription = "The board's ID or slug (from list_boards)."
+
+	BoardReportKindDescription = "Report kind: 'pass-fail', 'executions', 'workflows' or 'time-series'."
+
+	BoardReportParamsDescription = `Report params (a JSON object). Common to every kind:
+- duration: 'day', 'week', 'month' or 'quarter' (120 days) ending at the start of tomorrow; or set from/to (RFC3339) for a fixed range.
+- filter: dashboard filter list; prefer the 'filters' argument instead.
+Per kind:
+- pass-fail: measure 'ratio' (default), 'failed-count' or 'total-count'. Default duration: month.
+- executions: groupBy 'status' (default), 'statusDetailsType' (failure type), 'statusDetailsReason' (failure reason), 'workflow', a label key, or 'tag:<key>'; measure 'count' (default) or 'duration' (average, ms).
+- workflows: no extra params. Default duration: month.
+- time-series: measure (default 'execution-count') - 'execution-count', 'execution-duration', 'case-count',
+  a resource measure '<cpu-millicores|memory-used|network-in|network-out|disk-read|disk-write>-<min|max|avg|total>',
+  or a granular metric key from list_insight_metric_keys;
+  aggregate - one the measure offers, defaulting to the first: 'sum' only for counts (execution-count, case-count, '-total', count metrics),
+  'max'/'min' first for '-max'/'-min' measures, 'avg' only for '-avg', 'max' first for latency, duration and rate metrics, otherwise 'sum', 'avg', 'min' or 'max';
+  aggregationPeriod ('day', 'week', 'month', 'quarter' or 'year'; calendar buckets in UTC, default derived from the date range);
+  segment (break down by 'status', 'statusDetailsType', 'statusDetailsReason', 'workflow', a label key, 'tag:<key>' or an identity field; default 'status', '' for none);
+  chartType 'bar' (default), 'bar-grouped', 'bar-normalized', 'line-stacked', 'line', 'area-normalized', 'heatmap' or 'horizon'; overlaySuccessRate (boolean).
+Example: {"measure": "execution-duration", "aggregate": "avg", "segment": "workflow", "duration": "month", "chartType": "line"}`
+
+	BoardReportFiltersDescription = `Filters narrowing the report, as {key: [values]}. Keys: 'environment' (environment IDs; omit for every environment),
+'workflow' (workflow names), 'status' (e.g. 'passed', 'failed'), 'labels' (label selectors 'key=value'), 'tags' (tag predicates 'key=value'),
+'statusDetailsType' (why an execution did not pass: 'init-failure', 'execution-failure', 'step-failure', 'user-cancel' or 'unknown'),
+'statusDetailsReason' (failure reason codes, e.g. 'oom-killed', 'deadline-exceeded'). Pass-fail reports ignore 'status' and the failure filters.
+For time-series reports any other key is a granular identity filter (e.g. 'testcase'). Values prefixed with '~' match as a regex.
+Example: {"workflow": ["api-tests"], "status": ["failed"], "environment": ["tkcenv_..."]}`
+
+	BoardLayoutDescription = `Advanced: the board layout, to reorder reports or put several on one row. Format: {"version": 1, "rows": [{"cells": [{"id": "<reportId>"}, ...]}, ...]}.
+Every report on the board must appear exactly once. Get the current layout and report IDs with get_board.`
+
+	BoardRenderTimeZoneDescription = `IANA time zone of the person viewing the board, e.g. 'Europe/Berlin' or 'America/New_York'. The dashboard ends a relative range (day, week, month, quarter) at the viewer's local midnight, so use the user's zone to match what they see. Default: UTC.`
+
+	BoardRenderScopeDescription = `'board' (default) renders what the dashboard shows: each report's own environment filter, or every environment when it has none.
+'environment' limits every report to the current environment instead.`
+)

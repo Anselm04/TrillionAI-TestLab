@@ -1,0 +1,147 @@
+package client
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/pkg/errors"
+
+	phttp "github.com/kubeshop/testkube/pkg/http"
+)
+
+// cloudAgentSegment is the Control Plane's agent proxy, with the API version the
+// request is written for. Control Plane releases before 2.14.0 prefix /v1 to every
+// proxied path themselves, so against them this sends /v1/v1 to the agent.
+var cloudAgentSegment = "/agent/" + Version
+
+// CloudAgentPathPrefix is the path prefix of agent API requests sent through the
+// Control Plane for one environment.
+func CloudAgentPathPrefix(organizationID, environmentID string) string {
+	return fmt.Sprintf("/organizations/%s/environments/%s%s", organizationID, environmentID, cloudAgentSegment)
+}
+
+func NewCloudClient[A All](httpClient *http.Client, apiURI, apiPathPrefix string, insecure ...bool) CloudClient[A] {
+	if apiPathPrefix == "" {
+		apiPathPrefix = "/" + Version
+	}
+
+	isInsecure := false
+	if len(insecure) > 0 {
+		isInsecure = insecure[0]
+	}
+
+	signedURLClient := http.DefaultClient
+	if isInsecure {
+		signedURLClient = phttp.NewClient(true)
+	}
+
+	return CloudClient[A]{
+		client:        httpClient,
+		sseClient:     httpClient,
+		apiURI:        apiURI,
+		apiPathPrefix: apiPathPrefix,
+		insecure:      isInsecure,
+		signedClient:  signedURLClient,
+		DirectClient:  NewDirectClient[A](httpClient, apiURI, apiPathPrefix),
+	}
+}
+
+// CLoudClient is almost the same as Direct client, but has different GetFile method
+// which returns a download URL for the artifact instead of downloading it.
+type CloudClient[A All] struct {
+	client        *http.Client
+	sseClient     *http.Client
+	signedClient  *http.Client
+	apiURI        string
+	apiPathPrefix string
+	insecure      bool
+	DirectClient[A]
+}
+
+type ArtifactURL struct {
+	// Download URL for the artifact.
+	URL string `json:"url"`
+}
+
+// GetFile asks the Control Plane's own endpoint, outside the agent proxy, for a
+// download URL, then downloads the file from it.
+func (t CloudClient[A]) GetFile(uri, fileName, destination string, params map[string][]string) (name string, err error) {
+	cloudURI := strings.Replace(uri, cloudAgentSegment, "", 1)
+	req, err := http.NewRequestWithContext(context.TODO(), http.MethodGet, cloudURI, nil)
+	if err != nil {
+		return "", err
+	}
+
+	q := req.URL.Query()
+	for key, values := range params {
+		for _, value := range values {
+			if value != "" {
+				q.Add(key, value)
+			}
+		}
+	}
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return name, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode > 299 {
+		return name, &HTTPStatusError{StatusCode: resp.StatusCode}
+	}
+
+	var artifactURL ArtifactURL
+	err = json.NewDecoder(resp.Body).Decode(&artifactURL)
+	if err != nil {
+		return "", err
+	}
+
+	req, err = http.NewRequestWithContext(context.TODO(), http.MethodGet, artifactURL.URL, nil)
+	if err != nil {
+		return "", err
+	}
+	// Signed URLs should not reuse API auth headers, so use a dedicated client.
+	// Initialize it once during client construction to preserve connection pooling.
+	signedURLClient := t.signedClient
+	if signedURLClient == nil {
+		signedURLClient = http.DefaultClient
+	}
+	resp, err = signedURLClient.Do(req)
+	if err != nil {
+		return name, err
+	}
+	defer resp.Body.Close()
+
+	target := filepath.Join(destination, fileName)
+	dir := filepath.Dir(target)
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		if err = os.MkdirAll(dir, os.ModePerm); err != nil {
+			return name, err
+		}
+	} else if err != nil {
+		return name, err
+	}
+
+	f, err := os.Create(target)
+	if err != nil {
+		return name, err
+	}
+
+	if _, err = io.Copy(f, resp.Body); err != nil {
+		return name, err
+	}
+
+	if err = t.responseError(resp); err != nil {
+		return name, fmt.Errorf("api/download-file returned error: %w", err)
+	}
+
+	return f.Name(), nil
+}

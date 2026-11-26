@@ -1,0 +1,1328 @@
+package mcp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/mcp/boards"
+	"github.com/kubeshop/testkube/pkg/mcp/tools"
+)
+
+type ApiScope int
+
+const (
+	ApiScopeNone ApiScope = iota
+	ApiScopeOrg
+	ApiScopeOrgEnv
+)
+
+type APIRequest struct {
+	Method      string            // "GET", "POST", etc.
+	Path        string            // "/executions/{executionId}/logs"
+	Scope       ApiScope          // API scope level (default: ApiScopeNone)
+	PathParams  map[string]string // {executionId: "123"}
+	QueryParams map[string]string // Optional query parameters
+	Body        any               // Optional request body
+	Headers     map[string]string // Additional headers beyond auth
+}
+
+// defaultWaitPollInterval is how often WaitForExecutions re-reads the executions.
+const defaultWaitPollInterval = 5 * time.Second
+
+type APIClient struct {
+	config *MCPServerConfig
+	client *http.Client
+	// waitPollInterval is how often WaitForExecutions re-reads the executions.
+	waitPollInterval time.Duration
+}
+
+func NewAPIClient(cfg *MCPServerConfig, client *http.Client) *APIClient {
+	return &APIClient{
+		config:           cfg,
+		client:           client,
+		waitPollInterval: defaultWaitPollInterval,
+	}
+}
+
+// SupportsEndpoint checks if the control plane supports a specific endpoint.
+// Used for backwards compatibility with older control plane versions.
+func (c *APIClient) SupportsEndpoint(ctx context.Context, path string) bool {
+	req := APIRequest{
+		Method: http.MethodHead,
+		Path:   path,
+		Scope:  ApiScopeOrgEnv,
+	}
+	_, err := c.makeRequest(ctx, req)
+	return err == nil // 2xx = supported, 4xx/5xx = not supported
+}
+
+func (c *APIClient) buildApiUrl(path string, pathParams map[string]string, scope ApiScope) string {
+	// Replace path parameters in the path
+	finalPath := path
+	for key, value := range pathParams {
+		placeholder := "{" + key + "}"
+		finalPath = strings.ReplaceAll(finalPath, placeholder, value)
+	}
+
+	// Build the full URL based on scope
+	switch scope {
+	case ApiScopeNone:
+		return c.config.ControlPlaneUrl + finalPath
+	case ApiScopeOrg:
+		return fmt.Sprintf("%s/organizations/%s%s",
+			c.config.ControlPlaneUrl, c.config.OrgId, finalPath)
+	case ApiScopeOrgEnv:
+		return fmt.Sprintf("%s/organizations/%s/environments/%s%s",
+			c.config.ControlPlaneUrl, c.config.OrgId, c.config.EnvId, finalPath)
+	default:
+		return c.config.ControlPlaneUrl + finalPath
+	}
+}
+
+func (c *APIClient) userAgent() string {
+	source := c.config.Source
+	if source == "" {
+		source = "unknown"
+	}
+	return "Testkube-MCP/" + source
+}
+
+func (c *APIClient) makeRequest(ctx context.Context, apiReq APIRequest) (string, error) {
+	// Check if debug collection is active
+	debugInfo := GetDebugInfo(ctx)
+	if debugInfo != nil {
+		debugInfo.Source = "http"
+		debugInfo.Data["method"] = apiReq.Method
+	}
+
+	// Build the URL
+	fullURL := c.buildApiUrl(apiReq.Path, apiReq.PathParams, apiReq.Scope)
+
+	// Add query parameters if present
+	if len(apiReq.QueryParams) > 0 {
+		u, err := url.Parse(fullURL)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse URL: %w", err)
+		}
+
+		q := u.Query()
+		for key, value := range apiReq.QueryParams {
+			if value != "" { // Skip empty values
+				q.Add(key, value)
+			}
+		}
+		u.RawQuery = q.Encode()
+		fullURL = u.String()
+	}
+
+	// Record the final URL (including query params) for debugging. This must run
+	// after query params are appended so debug output reflects the request that
+	// was actually sent.
+	if debugInfo != nil {
+		debugInfo.Data["url"] = fullURL
+	}
+
+	// Prepare request body
+	var bodyReader *bytes.Reader
+	if apiReq.Body != nil {
+		var bodyBytes []byte
+		var err error
+
+		// Handle string bodies (like YAML) without JSON marshalling
+		if str, ok := apiReq.Body.(string); ok {
+			bodyBytes = []byte(str)
+		} else {
+			// JSON marshal for non-string bodies
+			bodyBytes, err = json.Marshal(apiReq.Body)
+			if err != nil {
+				return "", fmt.Errorf("failed to marshal request body: %w", err)
+			}
+		}
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	// Create the HTTP request
+	var req *http.Request
+	var err error
+	if bodyReader != nil {
+		req, err = http.NewRequestWithContext(ctx, apiReq.Method, fullURL, bodyReader)
+	} else {
+		req, err = http.NewRequestWithContext(ctx, apiReq.Method, fullURL, nil)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set standard headers
+	req.Header.Set("Authorization", "Bearer "+c.config.AccessToken)
+	// The Control Plane cannot otherwise tell this apart from any other Go client, and its audit
+	// log then records what an AI Agent did as if a person had done it from the dashboard.
+	req.Header.Set("User-Agent", c.userAgent())
+
+	// Set default Content-Type only if not already specified in custom headers
+	if _, hasContentType := apiReq.Headers["Content-Type"]; !hasContentType && apiReq.Body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	// Add custom headers (these can override defaults)
+	for key, value := range apiReq.Headers {
+		req.Header.Set(key, value)
+	}
+
+	// Execute the request
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check status code
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Read the error body so the caller (and the model) gets an actionable
+		// message instead of a bare status code. The control plane returns
+		// RFC-7807 application/problem+json bodies for 4xx errors.
+		errBody, _ := io.ReadAll(resp.Body)
+		if debugInfo != nil {
+			debugInfo.Data["status"] = resp.StatusCode
+			debugInfo.Data["requestHeaders"] = redactSensitiveHeaders(req.Header)
+			debugInfo.Data["responseHeaders"] = redactSensitiveHeaders(resp.Header)
+			if len(errBody) > 0 {
+				debugInfo.Data["responseBody"] = string(errBody)
+			}
+		}
+		return "", &apiStatusError{status: resp.StatusCode, detail: extractErrorDetail(errBody), errorCode: extractErrorCode(errBody)}
+	}
+
+	// Read response body as string
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Populate debug info if active
+	if debugInfo != nil {
+		debugInfo.Data["status"] = resp.StatusCode
+		debugInfo.Data["requestHeaders"] = redactSensitiveHeaders(req.Header)
+		debugInfo.Data["responseHeaders"] = redactSensitiveHeaders(resp.Header)
+	}
+
+	return string(bodyBytes), nil
+}
+
+// apiStatusError is a non-2xx response. Its message is what callers have
+// always seen; the status lets a method recognize one outcome, such as a 409
+// from a conditional board update, without matching on the text.
+type apiStatusError struct {
+	status int
+	detail string
+	// errorCode is the problem's errorCode, which tells apart refusals that
+	// share a status, such as the two kinds of board 409.
+	errorCode string
+}
+
+func (e *apiStatusError) Error() string {
+	if e.detail != "" {
+		return fmt.Sprintf("API returned status %d: %s", e.status, e.detail)
+	}
+	return fmt.Sprintf("API returned status %d", e.status)
+}
+
+// maxErrorDetailLen bounds how much of an error response body is surfaced to the
+// caller, so a large/unexpected body can't blow up the tool result.
+const maxErrorDetailLen = 2048
+
+// extractErrorDetail pulls a human-readable message out of an error response
+// body. It prefers the RFC-7807 problem+json "detail" (falling back to "title")
+// and otherwise returns the raw body. The result is trimmed and length-capped.
+func extractErrorDetail(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var problem struct {
+		Detail string `json:"detail"`
+		Title  string `json:"title"`
+	}
+	if err := json.Unmarshal(body, &problem); err == nil {
+		if problem.Detail != "" {
+			return truncate(strings.TrimSpace(problem.Detail), maxErrorDetailLen)
+		}
+		if problem.Title != "" {
+			return truncate(strings.TrimSpace(problem.Title), maxErrorDetailLen)
+		}
+	}
+	return truncate(strings.TrimSpace(string(body)), maxErrorDetailLen)
+}
+
+// extractErrorCode returns the errorCode of a problem+json error response, or
+// "" when the body has none.
+func extractErrorCode(body []byte) string {
+	var problem struct {
+		ErrorCode string `json:"errorCode"`
+	}
+	if json.Unmarshal(body, &problem) != nil {
+		return ""
+	}
+	return problem.ErrorCode
+}
+
+// boardConflict tells the two board 409s apart: a GitOps-owned board, which
+// is final, and a stale expectedVersion, which a fresh read can fix.
+func boardConflict(err error) error {
+	var statusErr *apiStatusError
+	if !errors.As(err, &statusErr) || statusErr.status != http.StatusConflict {
+		return err
+	}
+	if statusErr.errorCode == tools.ProblemCodeManagedByGitOps {
+		return fmt.Errorf("%w: %v", tools.ErrBoardManagedByGitOps, err)
+	}
+	return fmt.Errorf("%w: %v", tools.ErrBoardChanged, err)
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+var sensitiveHeaders = []string{
+	"authorization",
+	"cookie",
+	"x-api-key",
+	"x-auth-token",
+}
+
+// redactSensitiveHeaders removes sensitive information from headers
+func redactSensitiveHeaders(headers http.Header) map[string][]string {
+	if headers == nil {
+		return nil
+	}
+	redacted := make(map[string][]string)
+	for key, values := range headers {
+		lowerKey := strings.ToLower(key)
+		if slices.Contains(sensitiveHeaders, lowerKey) {
+			redacted[key] = []string{"[REDACTED]"}
+		} else {
+			redacted[key] = values
+		}
+	}
+	return redacted
+}
+
+func (c *APIClient) ListArtifacts(ctx context.Context, executionID string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflow-executions/{executionId}/artifacts",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"executionId": executionID,
+		},
+	})
+}
+
+func (c *APIClient) ReadArtifact(ctx context.Context, executionID, filename string, params tools.ArtifactReadParams) (string, error) {
+	response, err := c.makeRequest(ctx, APIRequest{
+		Method: "POST",
+		Path:   "/test-workflow-executions/{executionId}/artifacts",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"executionId": executionID,
+		},
+		Body: map[string]string{
+			"artifactID": filename,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Try to parse as JSON to check if it's a URL response
+	var urlResponse struct {
+		URL  string `json:"url"`
+		Data struct {
+			URL string `json:"url"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal([]byte(response), &urlResponse); err == nil {
+		// Check if we have a URL to download from
+		artifactURL := urlResponse.URL
+		if artifactURL == "" && urlResponse.Data.URL != "" {
+			artifactURL = urlResponse.Data.URL
+		}
+
+		// Only treat as URL response if we actually have a URL that looks like a URL
+		if artifactURL != "" && (strings.HasPrefix(artifactURL, "http://") || strings.HasPrefix(artifactURL, "https://")) {
+			// This is a URL response, we must download the content
+			req, err := http.NewRequestWithContext(ctx, "GET", artifactURL, nil)
+			if err != nil {
+				return "", fmt.Errorf("failed to create download request: %w", err)
+			}
+
+			resp, err := c.client.Do(req)
+			if err != nil {
+				return "", fmt.Errorf("failed to download artifact: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return "", fmt.Errorf("failed to download artifact: %d %s", resp.StatusCode, resp.Status)
+			}
+
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return "", fmt.Errorf("failed to read artifact content: %w", err)
+			}
+
+			return string(bodyBytes), nil
+		}
+	}
+
+	// If not a URL response, return the content as-is (could be JSON artifact content)
+	return response, nil
+}
+
+func (c *APIClient) GetExecutionLogs(ctx context.Context, executionID string, params tools.ExecutionLogParams) (string, error) {
+	queryParams := make(map[string]string)
+	if params.Tail > 0 {
+		queryParams["tail"] = strconv.Itoa(params.Tail)
+	}
+	if params.StartLine > 0 {
+		queryParams["startLine"] = strconv.Itoa(params.StartLine)
+	}
+	if params.EndLine > 0 {
+		queryParams["endLine"] = strconv.Itoa(params.EndLine)
+	}
+	if params.Grep != "" {
+		queryParams["grep"] = params.Grep
+	}
+	if params.Step != "" {
+		queryParams["step"] = params.Step
+	}
+	if params.WorkerRef != "" {
+		queryParams["workerRef"] = params.WorkerRef
+		queryParams["workerIndex"] = strconv.Itoa(params.WorkerIndex)
+	}
+	return c.makeRequest(ctx, APIRequest{
+		Method:      "GET",
+		Path:        "/agent/test-workflow-executions/{executionId}/logs",
+		Scope:       ApiScopeOrgEnv,
+		PathParams:  map[string]string{"executionId": executionID},
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) GetExecutionInfo(ctx context.Context, workflowName, executionID string) (string, error) {
+	if workflowName == "" {
+		return c.makeRequest(ctx, APIRequest{
+			Method: "GET",
+			Path:   "/agent/test-workflow-executions/{executionId}",
+			Scope:  ApiScopeOrgEnv,
+			PathParams: map[string]string{
+				"executionId": executionID,
+			},
+		})
+	}
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflows/{workflowName}/executions/{executionId}",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+			"executionId":  executionID,
+		},
+	})
+}
+
+func (c *APIClient) ListExecutions(ctx context.Context, params tools.ListExecutionsParams) (string, error) {
+	queryParams := make(map[string]string)
+
+	if params.Selector != "" {
+		queryParams["selector"] = params.Selector
+	}
+	if params.TagSelector != "" {
+		queryParams["tagSelector"] = params.TagSelector
+	}
+	if params.TextSearch != "" {
+		queryParams["textSearch"] = params.TextSearch
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	} else {
+		queryParams["pageSize"] = "10"
+	}
+	if params.Page >= 0 {
+		queryParams["page"] = strconv.Itoa(params.Page)
+	} else {
+		queryParams["page"] = "0"
+	}
+	if params.Status != "" {
+		queryParams["status"] = params.Status
+	}
+	if params.Since != "" {
+		queryParams["since"] = params.Since
+	}
+	if params.StartDate != "" {
+		queryParams["startDate"] = params.StartDate
+	}
+	if params.EndDate != "" {
+		queryParams["endDate"] = params.EndDate
+	}
+
+	path := "/agent/test-workflow-executions"
+	if params.WorkflowName != "" {
+		path = "/agent/test-workflows/{workflowName}/executions"
+		return c.makeRequest(ctx, APIRequest{
+			Method: "GET",
+			Path:   path,
+			Scope:  ApiScopeOrgEnv,
+			PathParams: map[string]string{
+				"workflowName": params.WorkflowName,
+			},
+			QueryParams: queryParams,
+		})
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      "GET",
+		Path:        path,
+		Scope:       ApiScopeOrgEnv,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) LookupExecutionID(ctx context.Context, executionName string) (string, error) {
+	workflowName, _, err := extractWorkflowNameFromExecutionName(executionName)
+	if err != nil {
+		return "", fmt.Errorf("invalid execution name format: %w", err)
+	}
+
+	// Use text search to find the execution
+	queryParams := map[string]string{
+		"textSearch": executionName,
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflows/{workflowName}/executions",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+		},
+		QueryParams: queryParams,
+	})
+}
+
+// ListWorkflows retrieves workflows with optional filtering
+func (c *APIClient) ListWorkflows(ctx context.Context, params tools.ListWorkflowsParams) (string, error) {
+	queryParams := make(map[string]string)
+
+	if params.ResourceGroup != "" {
+		queryParams["resourceGroup"] = params.ResourceGroup
+	}
+	if params.Selector != "" {
+		queryParams["selector"] = params.Selector
+	}
+	if params.TextSearch != "" {
+		queryParams["textSearch"] = params.TextSearch
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	} else {
+		queryParams["pageSize"] = "10"
+	}
+	if params.Page >= 0 {
+		queryParams["page"] = strconv.Itoa(params.Page)
+	} else {
+		queryParams["page"] = "0"
+	}
+	if params.Status != "" {
+		queryParams["status"] = params.Status
+	}
+	if params.GroupID != "" {
+		queryParams["groupId"] = params.GroupID
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      "GET",
+		Path:        "/agent/test-workflow-with-executions",
+		Scope:       ApiScopeOrgEnv,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) GetWorkflow(ctx context.Context, workflowName string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflow-with-executions/{workflowName}",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+		},
+	})
+}
+
+func (c *APIClient) GetWorkflowDefinition(ctx context.Context, workflowName string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflows/{workflowName}",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+		},
+		Headers: map[string]string{
+			"Accept": "text/yaml",
+		},
+	})
+}
+
+func (c *APIClient) CreateWorkflow(ctx context.Context, workflowDefinition string) (string, error) {
+
+	return c.makeRequest(ctx, APIRequest{
+		Method: "POST",
+		Path:   "/agent/test-workflows",
+		Scope:  ApiScopeOrgEnv,
+		Body:   workflowDefinition,
+		Headers: map[string]string{
+			"Content-Type": "text/yaml",
+		},
+	})
+}
+
+func (c *APIClient) UpdateWorkflow(ctx context.Context, workflowName, workflowDefinition string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "PUT",
+		Path:   "/agent/test-workflows/{workflowName}",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+		},
+		Body: workflowDefinition,
+		Headers: map[string]string{
+			"Content-Type": "text/yaml",
+		},
+	})
+}
+
+// convertTargetToExecutionTarget converts the MCP target parameter to the proper ExecutionTarget format
+// Supports multiple input formats:
+// 1. {"name": "agent-name"} -> {"match": {"name": ["agent-name"]}}
+// 2. {"labels": {"env": "prod", "type": "runner"}} -> {"match": {"env": ["prod"], "type": ["runner"]}}
+// 3. {"match": {"env": ["prod"]}} -> passed through as-is
+// 4. {"not": {"env": ["dev"]}} -> passed through as-is
+// 5. {"replicate": ["env"]} -> passed through as-is
+func convertTargetToExecutionTarget(target map[string]any) map[string]any {
+	result := make(map[string]any)
+
+	// Handle name-based targeting (convert to match format)
+	if name, exists := target["name"]; exists {
+		if nameStr, ok := name.(string); ok {
+			result["match"] = map[string]any{
+				"name": []string{nameStr},
+			}
+		}
+		return result
+	}
+
+	// Handle labels-based targeting (convert to match format)
+	if labels, exists := target["labels"]; exists {
+		if labelsMap, ok := labels.(map[string]any); ok {
+			match := make(map[string]any)
+			for key, value := range labelsMap {
+				switch v := value.(type) {
+				case string:
+					match[key] = []string{v}
+				case []string:
+					match[key] = v
+				case []any:
+					// Convert []any to []string
+					strSlice := make([]string, len(v))
+					for i, item := range v {
+						if str, ok := item.(string); ok {
+							strSlice[i] = str
+						}
+					}
+					match[key] = strSlice
+				}
+			}
+			if len(match) > 0 {
+				result["match"] = match
+			}
+		}
+		return result
+	}
+
+	// Handle standard ExecutionTarget fields (pass through)
+	if match, exists := target["match"]; exists {
+		result["match"] = match
+	}
+	if not, exists := target["not"]; exists {
+		result["not"] = not
+	}
+	if replicate, exists := target["replicate"]; exists {
+		result["replicate"] = replicate
+	}
+
+	return result
+}
+
+func (c *APIClient) RunWorkflow(ctx context.Context, params tools.RunWorkflowParams) (string, error) {
+	body := map[string]any{
+		"config": params.Config,
+		"runningContext": map[string]any{
+			"actor": map[string]any{
+				"type": "user",
+			},
+			"interface": map[string]any{
+				"type": "api",
+			},
+		},
+	}
+
+	if params.Target != nil {
+		body["target"] = convertTargetToExecutionTarget(params.Target)
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method: "POST",
+		Path:   "/agent/test-workflows/{workflowName}/executions",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": params.WorkflowName,
+		},
+		Body: body,
+	})
+}
+
+func (c *APIClient) ListLabels(ctx context.Context) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/labels",
+		Scope:  ApiScopeOrgEnv,
+	})
+}
+
+func (c *APIClient) ListResourceGroups(ctx context.Context) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/groups",
+		Scope:  ApiScopeOrg,
+	})
+}
+
+func (c *APIClient) ListAgents(ctx context.Context, params tools.ListAgentsParams) (string, error) {
+	queryParams := make(map[string]string)
+
+	if params.Type != "" {
+		queryParams["type"] = params.Type
+	}
+	if params.Capability != "" {
+		queryParams["capability"] = params.Capability
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	} else {
+		queryParams["pageSize"] = "20"
+	}
+	if params.Page >= 0 {
+		queryParams["page"] = strconv.Itoa(params.Page)
+	} else {
+		queryParams["page"] = "0"
+	}
+
+	queryParams["includeDeleted"] = "false"
+
+	// Add environment ID as a filter
+	queryParams["environmentId"] = c.config.EnvId
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      "GET",
+		Path:        "/agents",
+		Scope:       ApiScopeOrg,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) UpdateExecutionTags(ctx context.Context, executionId string, tags map[string]string) error {
+	_, err := c.makeRequest(ctx, APIRequest{
+		Method: http.MethodPatch,
+		Path:   "/agent/test-workflow-executions/{executionId}/tags",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"executionId": executionId,
+		},
+		Body: tags,
+	})
+	return err
+}
+
+func (c *APIClient) AbortWorkflowExecution(ctx context.Context, workflowName, executionId string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "POST",
+		Path:   "/agent/test-workflows/{workflowName}/executions/{executionId}/abort",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+			"executionId":  executionId,
+		},
+	})
+}
+
+// extracts workflow name from execution name e.g., "my-workflow-123" -> ("my-workflow", 123)
+func extractWorkflowNameFromExecutionName(executionName string) (string, int, error) {
+	lastDashIndex := strings.LastIndex(executionName, "-")
+	if lastDashIndex == -1 {
+		return "", 0, fmt.Errorf("execution name must contain a dash followed by a number")
+	}
+
+	workflowName := executionName[:lastDashIndex]
+	executionNumberStr := executionName[lastDashIndex+1:]
+
+	executionNumber, err := strconv.Atoi(executionNumberStr)
+	if err != nil {
+		return "", 0, fmt.Errorf("execution name must end with a number, got: %s", executionNumberStr)
+	}
+
+	return workflowName, executionNumber, nil
+}
+
+func (c *APIClient) GetWorkflowMetrics(ctx context.Context, workflowName string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflows/{workflowName}/metrics",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+		},
+	})
+}
+
+func (c *APIClient) GetWorkflowExecutionMetrics(ctx context.Context, workflowName, executionID string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflows/{workflowName}/executions/{executionId}/metrics",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": workflowName,
+			"executionId":  executionID,
+		},
+	})
+}
+
+func (c *APIClient) WaitForExecutions(ctx context.Context, executionIds []string) (string, error) {
+	// Track completed executions to avoid re-checking them
+	completedExecutions := make(map[string]bool)
+	allResults := make(map[string]json.RawMessage)
+
+	// Polling loop
+	ticker := time.Tick(c.waitPollInterval)
+
+	// TODO: improve inner loop / polling logic in line with suggestion at https://github.com/kubeshop/testkube/pull/6706#discussion_r2381356579
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("timeout waiting for executions: %w", ctx.Err())
+		case <-ticker:
+			var allComplete = true
+
+			// Only check executions that haven't completed yet
+			var remainingExecutions []string
+			for _, executionId := range executionIds {
+				if !completedExecutions[executionId] {
+					remainingExecutions = append(remainingExecutions, executionId)
+				}
+			}
+
+			// Check status of remaining executions
+			for _, executionId := range remainingExecutions {
+				// Get execution status
+				response, err := c.makeRequest(ctx, APIRequest{
+					Method: "GET",
+					Path:   "/agent/test-workflow-executions/{executionId}",
+					Scope:  ApiScopeOrgEnv,
+					PathParams: map[string]string{
+						"executionId": executionId,
+					},
+				})
+				if err != nil {
+					return "", fmt.Errorf("failed to get execution %s: %w", executionId, err)
+				}
+
+				// Parse the response to extract status
+				var execInfo map[string]interface{}
+				if err := json.Unmarshal([]byte(response), &execInfo); err != nil {
+					return "", fmt.Errorf("failed to parse execution response for %s: %w", executionId, err)
+				}
+
+				// Extract status
+				var status string
+				if result, ok := execInfo["result"].(map[string]interface{}); ok {
+					if statusVal, ok := result["status"].(string); ok {
+						status = statusVal
+					}
+				}
+				if status == "" {
+					return "", fmt.Errorf("status not found in execution response for %s", executionId)
+				}
+
+				// Keep the whole execution: the wait_for_executions formatter reads
+				// id, name and result from TestWorkflowExecution records.
+				allResults[executionId] = json.RawMessage(response)
+
+				// Check if execution is in a final state
+				if slices.Contains(testkube.TestWorkflowTerminalStatus, testkube.TestWorkflowStatus(status)) {
+					completedExecutions[executionId] = true
+				} else {
+					allComplete = false
+				}
+			}
+
+			if allComplete {
+				// Build results array from all results (both completed and in-progress)
+				var results []json.RawMessage
+				for _, executionId := range executionIds {
+					if result, exists := allResults[executionId]; exists {
+						results = append(results, result)
+					}
+				}
+
+				resultJSON, err := json.Marshal(results)
+				if err != nil {
+					return "", fmt.Errorf("failed to encode execution results: %w", err)
+				}
+				return string(resultJSON), nil
+			}
+		}
+	}
+}
+
+func (c *APIClient) GetWorkflowResourceHistory(ctx context.Context, params tools.WorkflowResourceHistoryParams) (string, error) {
+	queryParams := make(map[string]string)
+
+	if params.LastN > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.LastN)
+	} else {
+		queryParams["pageSize"] = "50"
+	}
+	queryParams["page"] = "0"
+
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflows/{workflowName}/executions",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"workflowName": params.WorkflowName,
+		},
+		QueryParams: queryParams,
+	})
+}
+
+// WorkflowTemplate methods
+
+func (c *APIClient) ListWorkflowTemplates(ctx context.Context, selector string) (string, error) {
+	queryParams := make(map[string]string)
+	if selector != "" {
+		queryParams["selector"] = selector
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      "GET",
+		Path:        "/agent/test-workflow-templates",
+		Scope:       ApiScopeOrgEnv,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) GetWorkflowTemplateDefinition(ctx context.Context, templateName string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "GET",
+		Path:   "/agent/test-workflow-templates/{templateName}",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"templateName": templateName,
+		},
+		Headers: map[string]string{
+			"Accept": "text/yaml",
+		},
+	})
+}
+
+func (c *APIClient) CreateWorkflowTemplate(ctx context.Context, templateDefinition string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "POST",
+		Path:   "/agent/test-workflow-templates",
+		Scope:  ApiScopeOrgEnv,
+		Body:   templateDefinition,
+		Headers: map[string]string{
+			"Content-Type": "text/yaml",
+		},
+	})
+}
+
+func (c *APIClient) UpdateWorkflowTemplate(ctx context.Context, templateName, templateDefinition string) (string, error) {
+	return c.makeRequest(ctx, APIRequest{
+		Method: "PUT",
+		Path:   "/agent/test-workflow-templates/{templateName}",
+		Scope:  ApiScopeOrgEnv,
+		PathParams: map[string]string{
+			"templateName": templateName,
+		},
+		Body: templateDefinition,
+		Headers: map[string]string{
+			"Content-Type": "text/yaml",
+		},
+	})
+}
+
+// GetWorkflowDefinitions fetches multiple workflow definitions in bulk from the control plane.
+// It calls the bulk endpoint that returns all workflow YAML definitions in a single request.
+func (c *APIClient) GetWorkflowDefinitions(ctx context.Context, params tools.ListWorkflowsParams) (map[string]string, error) {
+	queryParams := make(map[string]string)
+
+	if params.Selector != "" {
+		queryParams["selector"] = params.Selector
+	}
+	if params.ResourceGroup != "" {
+		queryParams["resourceGroup"] = params.ResourceGroup
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	} else {
+		queryParams["pageSize"] = "50" // Default limit
+	}
+	if params.FetchAll {
+		queryParams["fetchAll"] = "true"
+	}
+
+	result, err := c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/agent/test-workflows/definitions",
+		Scope:       ApiScopeOrgEnv,
+		QueryParams: queryParams,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch workflow definitions: %w", err)
+	}
+
+	var definitions map[string]string
+	if err := json.Unmarshal([]byte(result), &definitions); err != nil {
+		return nil, fmt.Errorf("failed to parse workflow definitions: %w", err)
+	}
+
+	return definitions, nil
+}
+
+// GetExecutions fetches multiple execution summary records in bulk from the control plane.
+// It calls the bulk endpoint that returns all execution summaries in a single request.
+func (c *APIClient) GetExecutions(ctx context.Context, params tools.ListExecutionsParams) (map[string]string, error) {
+	queryParams := make(map[string]string)
+
+	if params.WorkflowName != "" {
+		queryParams["workflowName"] = params.WorkflowName
+	}
+	if params.Status != "" {
+		queryParams["status"] = params.Status
+	}
+	if params.TextSearch != "" {
+		queryParams["textSearch"] = params.TextSearch
+	}
+	if params.Selector != "" {
+		queryParams["selector"] = params.Selector
+	}
+	if params.TagSelector != "" {
+		queryParams["tagSelector"] = params.TagSelector
+	}
+	if params.Since != "" {
+		queryParams["since"] = params.Since
+	}
+	if params.StartDate != "" {
+		queryParams["startDate"] = params.StartDate
+	}
+	if params.EndDate != "" {
+		queryParams["endDate"] = params.EndDate
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	} else {
+		queryParams["pageSize"] = "50" // Default limit
+	}
+	if params.FetchAll {
+		queryParams["fetchAll"] = "true"
+	}
+
+	result, err := c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/agent/test-workflow-executions/summaries",
+		Scope:       ApiScopeOrgEnv,
+		QueryParams: queryParams,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch execution summaries: %w", err)
+	}
+
+	var executions map[string]string
+	if err := json.Unmarshal([]byte(result), &executions); err != nil {
+		return nil, fmt.Errorf("failed to parse execution summaries: %w", err)
+	}
+
+	return executions, nil
+}
+
+// Insight (ingested metrics) methods
+//
+// These hit the org-scoped insight endpoints under /organizations/{id}/insights.
+// Unlike most workflow/execution endpoints they are not environment-scoped in the
+// path; the environment is passed as the "env" query parameter (empty values are
+// dropped by makeRequest).
+
+func (c *APIClient) ListInsightSeries(ctx context.Context, params tools.InsightSeriesCatalogParams) (string, error) {
+	queryParams := map[string]string{
+		"env":             c.config.EnvId,
+		"workflow":        params.Workflow,
+		"source":          params.Source,
+		"metricKey":       params.MetricKey,
+		"identityFilters": params.IdentityFilters,
+		"q":               params.Query,
+	}
+	if params.Page > 0 {
+		queryParams["page"] = strconv.Itoa(params.Page)
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/insights/series/catalog",
+		Scope:       ApiScopeOrg,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) ListInsightMetricKeys(ctx context.Context, params tools.InsightMetricKeysParams) (string, error) {
+	queryParams := map[string]string{
+		"env":             c.config.EnvId,
+		"workflow":        params.Workflow,
+		"source":          params.Source,
+		"identityFilters": params.IdentityFilters,
+		"q":               params.Query,
+	}
+	if params.Page > 0 {
+		queryParams["page"] = strconv.Itoa(params.Page)
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/insights/series/catalog/metric-keys",
+		Scope:       ApiScopeOrg,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) GetInsightMetricSeries(ctx context.Context, params tools.InsightMetricSeriesParams) (string, error) {
+	queryParams := map[string]string{
+		"env":             c.config.EnvId,
+		"measure":         params.Measure,
+		"seriesId":        params.SeriesID,
+		"aggregate":       params.Aggregate,
+		"segment":         params.Segment,
+		"workflow":        params.Workflow,
+		"identityFilters": params.IdentityFilters,
+		"status":          params.Status,
+		"tagFilter":       params.TagFilter,
+		"startDate":       params.StartDate,
+		"endDate":         params.EndDate,
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/insights/series",
+		Scope:       ApiScopeOrg,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) ListInsightExecutions(ctx context.Context, params tools.InsightExecutionsParams) (string, error) {
+	queryParams := map[string]string{
+		"env":             c.config.EnvId,
+		"measure":         params.Measure,
+		"identityFilters": params.IdentityFilters,
+		"workflow":        params.Workflow,
+		"status":          params.Status,
+		"tagFilter":       params.TagFilter,
+		"startDate":       params.StartDate,
+		"endDate":         params.EndDate,
+	}
+	if params.Page > 0 {
+		queryParams["page"] = strconv.Itoa(params.Page)
+	}
+	if params.PageSize > 0 {
+		queryParams["pageSize"] = strconv.Itoa(params.PageSize)
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/insights/series/executions",
+		Scope:       ApiScopeOrg,
+		QueryParams: queryParams,
+	})
+}
+
+// Insights board methods
+//
+// Boards are organization-scoped: they live under /organizations/{id}/boards,
+// with no environment in the path or query. The Control Plane refuses API
+// tokens on every board endpoint, and older versions answer them with a bare
+// 500, so these methods refuse an API token themselves before sending anything.
+
+// apiTokenPrefix marks a Testkube API token, as opposed to a user access token.
+const apiTokenPrefix = "tkcapi_"
+
+func (c *APIClient) requireUserSession() error {
+	if strings.HasPrefix(c.config.AccessToken, apiTokenPrefix) {
+		return tools.ErrBoardsRequireUser
+	}
+	return nil
+}
+
+func (c *APIClient) ListBoards(ctx context.Context, params tools.ListBoardsParams) (string, error) {
+	if err := c.requireUserSession(); err != nil {
+		return "", err
+	}
+	queryParams := map[string]string{
+		"name":     params.Name,
+		"page":     strconv.Itoa(params.Page),
+		"pageSize": strconv.Itoa(params.PageSize),
+	}
+	for key, set := range map[string]bool{
+		"private":      params.Private,
+		"shared":       params.Shared,
+		"userFavorite": params.UserFavorite,
+		"orgFavorite":  params.OrgFavorite,
+	} {
+		if set {
+			queryParams[key] = "true"
+		}
+	}
+
+	return c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/boards",
+		Scope:       ApiScopeOrg,
+		QueryParams: queryParams,
+	})
+}
+
+func (c *APIClient) GetBoard(ctx context.Context, board string) (string, error) {
+	if err := c.requireUserSession(); err != nil {
+		return "", err
+	}
+	return c.makeRequest(ctx, APIRequest{
+		Method:     http.MethodGet,
+		Path:       "/boards/{boardID}",
+		Scope:      ApiScopeOrg,
+		PathParams: map[string]string{"boardID": url.PathEscape(board)},
+	})
+}
+
+func (c *APIClient) CheckBoardSlug(ctx context.Context, slug string) (bool, error) {
+	if err := c.requireUserSession(); err != nil {
+		return false, err
+	}
+	result, err := c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        "/board-slug",
+		Scope:       ApiScopeOrg,
+		QueryParams: map[string]string{"slug": slug},
+	})
+	if err != nil {
+		return false, err
+	}
+	var availability struct {
+		Available bool `json:"available"`
+	}
+	if err := json.Unmarshal([]byte(result), &availability); err != nil {
+		return false, fmt.Errorf("failed to parse slug availability: %w", err)
+	}
+	return availability.Available, nil
+}
+
+func (c *APIClient) CreateBoard(ctx context.Context, params tools.CreateBoardParams) (string, error) {
+	if err := c.requireUserSession(); err != nil {
+		return "", err
+	}
+	return c.makeRequest(ctx, APIRequest{
+		Method: http.MethodPost,
+		Path:   "/boards",
+		Scope:  ApiScopeOrg,
+		Body:   params,
+	})
+}
+
+func (c *APIClient) UpdateBoard(ctx context.Context, board string, request tools.UpdateBoardRequest) (string, error) {
+	if err := c.requireUserSession(); err != nil {
+		return "", err
+	}
+	result, err := c.makeRequest(ctx, APIRequest{
+		Method:     http.MethodPatch,
+		Path:       "/boards/{boardID}",
+		Scope:      ApiScopeOrg,
+		PathParams: map[string]string{"boardID": url.PathEscape(board)},
+		Body:       request,
+	})
+	if err != nil {
+		return "", boardConflict(err)
+	}
+	return result, nil
+}
+
+func (c *APIClient) DeleteBoard(ctx context.Context, board string) error {
+	if err := c.requireUserSession(); err != nil {
+		return err
+	}
+	_, err := c.makeRequest(ctx, APIRequest{
+		Method:     http.MethodDelete,
+		Path:       "/boards/{boardID}",
+		Scope:      ApiScopeOrg,
+		PathParams: map[string]string{"boardID": url.PathEscape(board)},
+	})
+	// A delete is never conditional, so its only 409 is a GitOps-owned board.
+	var statusErr *apiStatusError
+	if errors.As(err, &statusErr) && statusErr.status == http.StatusConflict && statusErr.errorCode == tools.ProblemCodeManagedByGitOps {
+		return fmt.Errorf("%w: %v", tools.ErrBoardManagedByGitOps, err)
+	}
+	return err
+}
+
+// QueryBoardInsights runs the org-scoped insight query that renders a board
+// report. Unlike the other insight methods it does not add the session's
+// environment: a report carries its own environment filter, unless the query
+// asks for the current environment. The insight endpoints themselves accept
+// API tokens, but this is a board method and refuses them like the rest, as
+// the Control Plane's client does.
+func (c *APIClient) QueryBoardInsights(ctx context.Context, query boards.InsightQuery) (string, error) {
+	if err := c.requireUserSession(); err != nil {
+		return "", err
+	}
+	query = query.WithEnvironment(c.config.EnvId)
+	return c.makeRequest(ctx, APIRequest{
+		Method:      http.MethodGet,
+		Path:        string(query.Endpoint),
+		Scope:       ApiScopeOrg,
+		QueryParams: query.QueryParams(),
+	})
+}

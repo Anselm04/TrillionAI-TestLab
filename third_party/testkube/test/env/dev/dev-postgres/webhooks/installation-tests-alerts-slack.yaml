@@ -1,0 +1,29 @@
+apiVersion: executor.testkube.io/v1
+kind: Webhook
+metadata:
+  name: slack-installation-alerts
+spec:
+  events:
+  - end-testworkflow-failed
+  - end-testworkflow-aborted
+  uri: '{{credential("webhook-slack-installation-alerts-url")}}'
+  selector: core-tests=installation
+  payloadTemplate: |-
+    {
+      "text": ":alert: *Installation test {{ .TestWorkflowExecution.Workflow.Name }} failed*\n*Execution*: {{.TestWorkflowExecution.Name}}\n*Status*: {{ .Type_ }}\n*Possible Severity*: High\n*Possible Impact*: A released version may fail to install or upgrade.\n*Logs*: {{ .ExecutionURL }}"
+    }
+
+---
+apiVersion: executor.testkube.io/v1
+kind: Webhook
+metadata:
+  name: slack-installation-back-to-normal
+spec:
+  events:
+  - become-testworkflow-up
+  uri: '{{credential("webhook-slack-installation-alerts-url")}}'
+  selector: core-tests=installation
+  payloadTemplate: |-
+    {
+      "text": ":large_green_circle: *Installation test {{ .TestWorkflowExecution.Workflow.Name }} recovered*\n*Logs*: {{ .ExecutionURL }}"
+    }

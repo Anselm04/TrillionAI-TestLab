@@ -1,0 +1,34 @@
+apiVersion: testworkflows.testkube.io/v1
+kind: TestWorkflow
+metadata:
+  name: prod-healthchecks-workflow-suite
+  labels:
+    core-tests: workflows-suite
+    type: suite
+    tool: healthcheck
+    team-support: "true"
+spec:
+  pod:
+    # Healthchecks drive prod alerts; keep them off spot nodes so a preemption does not page as an outage.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: cloud.google.com/gke-spot
+                  operator: NotIn
+                  values: ["true"]
+  container:
+    resources:
+      requests:
+        cpu: 32m
+        memory: 32Mi
+  steps:
+  - execute:
+      parallelism: 5
+      workflows:
+      - name: prod-healthcheck
+      - name: prod-eu-healthcheck
+      - name: public-demo-healthcheck
+      - name: paris-healthcheck
+      - name: license-healthcheck

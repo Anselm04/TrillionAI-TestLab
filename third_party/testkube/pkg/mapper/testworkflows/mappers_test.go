@@ -1,0 +1,592 @@
+package testworkflows
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	testworkflowsv1 "github.com/kubeshop/testkube/api/testworkflows/v1"
+	"github.com/kubeshop/testkube/internal/common"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+)
+
+var (
+	container = testworkflowsv1.ContainerConfig{
+		WorkingDir:      common.Ptr("/wd"),
+		Image:           "some-image",
+		ImagePullPolicy: "IfNotPresent",
+		Env: []testworkflowsv1.EnvVar{
+			{EnvVar: corev1.EnvVar{Name: "some-naaame", Value: "some-value"}},
+			{EnvVar: corev1.EnvVar{Name: "some-naaame", ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					APIVersion: "api.value.1",
+					FieldPath:  "the.field.pa",
+				},
+				ResourceFieldRef: &corev1.ResourceFieldSelector{
+					ContainerName: "con-name",
+					Resource:      "anc",
+				},
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "cfg-name"},
+					Key:                  "cfg-key",
+				},
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "some-sec"},
+					Key:                  "sec-key",
+				},
+			}}},
+		},
+		EnvFrom: []corev1.EnvFromSource{
+			{
+				Prefix: "some-prefix",
+				ConfigMapRef: &corev1.ConfigMapEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: "some-name",
+					},
+				},
+				SecretRef: &corev1.SecretEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: "some-sec",
+					},
+					Optional: common.Ptr(true),
+				},
+			},
+		},
+		Command: common.Ptr([]string{"c", "d"}),
+		Args:    common.Ptr([]string{"ar", "gs"}),
+		Resources: &testworkflowsv1.Resources{
+			Limits: map[corev1.ResourceName]testworkflowsv1.ConfigValue{
+				corev1.ResourceCPU:    "300m",
+				corev1.ResourceMemory: "1024",
+			},
+			Requests: map[corev1.ResourceName]testworkflowsv1.ConfigValue{
+				corev1.ResourceCPU:    "3800m",
+				corev1.ResourceMemory: "10204",
+			},
+		},
+		SecurityContext: testworkflowsv1.WorkflowSecurityContextFromKube(&corev1.SecurityContext{
+			Capabilities: &corev1.Capabilities{
+				Add:  []corev1.Capability{"NET_ADMIN"},
+				Drop: []corev1.Capability{"ALL"},
+			},
+			RunAsUser:                common.Ptr(int64(334)),
+			RunAsGroup:               common.Ptr(int64(11)),
+			RunAsNonRoot:             common.Ptr(true),
+			ReadOnlyRootFilesystem:   common.Ptr(false),
+			AllowPrivilegeEscalation: nil,
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		}),
+	}
+	content = testworkflowsv1.Content{
+		Git: &testworkflowsv1.ContentGit{
+			Uri:      "some-uri",
+			Revision: "some-revision",
+			Username: "some-username",
+			UsernameFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					APIVersion: "testworkflows.dummy.io/v1",
+					FieldPath:  "the.field.path",
+				},
+				ResourceFieldRef: &corev1.ResourceFieldSelector{
+					ContainerName: "container.name",
+					Resource:      "the.resource",
+					Divisor:       resource.MustParse("300"),
+				},
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "the-name-config"},
+					Key:                  "the-key",
+					Optional:             common.Ptr(true),
+				},
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "the-name-secret"},
+					Key:                  "the-key-secret",
+					Optional:             nil,
+				},
+			},
+			Token: "the-token",
+			TokenFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					APIVersion: "some.dummy.api/v1",
+					FieldPath:  "some.field",
+				},
+				ResourceFieldRef: &corev1.ResourceFieldSelector{
+					ContainerName: "some-container-name",
+					Resource:      "some-resource",
+					Divisor:       resource.MustParse("200"),
+				},
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "the-name"},
+					Key:                  "the-abc",
+					Optional:             nil,
+				},
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "xyz"},
+					Key:                  "222",
+					Optional:             nil,
+				},
+			},
+			AuthType:  "basic",
+			MountPath: "/some/output/path",
+			Paths:     []string{"a", "b", "c"},
+		},
+		Files: []testworkflowsv1.ContentFile{
+			{
+				Path:    "some-path",
+				Content: "some-content",
+				ContentFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						APIVersion: "api.version.abc",
+						FieldPath:  "field.path",
+					},
+				},
+				Mode: common.Ptr(int32(0777)),
+			},
+		},
+	}
+	stepBaseMeta = testworkflowsv1.StepMeta{
+		Name:      "some-name",
+		Condition: "some-condition",
+	}
+	stepBaseControl = testworkflowsv1.StepControl{
+		Negative: true,
+		Optional: false,
+		Retry: &testworkflowsv1.RetryPolicy{
+			Count: 444,
+			Until: "abc",
+		},
+		Timeout: "3h15m",
+	}
+	stepBaseSource = testworkflowsv1.StepSource{
+		Content: &testworkflowsv1.Content{
+			Git: &testworkflowsv1.ContentGit{
+				Uri:      "some-url",
+				Revision: "another-rev",
+				Username: "some-username",
+				UsernameFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						APIVersion: "dummy.api",
+						FieldPath:  "field.path.there",
+					},
+					ResourceFieldRef: &corev1.ResourceFieldSelector{
+						ContainerName: "con-name",
+						Resource:      "abc1",
+					},
+				},
+				Token: "",
+				TokenFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						APIVersion: "test.v1",
+						FieldPath:  "abc.there",
+					},
+				},
+				AuthType:  "basic",
+				MountPath: "/a/b/c",
+				Paths:     []string{"p", "a", "th"},
+			},
+			Files: []testworkflowsv1.ContentFile{
+				{Path: "abc", Content: "some-content"},
+			},
+		},
+	}
+	stepBaseDefaults = testworkflowsv1.StepDefaults{
+		WorkingDir: common.Ptr("/ssss"),
+		Container: &testworkflowsv1.ContainerConfig{
+			WorkingDir:      common.Ptr("/aaaa"),
+			Image:           "ssss",
+			ImagePullPolicy: "Never",
+			Env:             []testworkflowsv1.EnvVar{{EnvVar: corev1.EnvVar{Name: "xyz", Value: "bar"}}},
+			Command:         common.Ptr([]string{"ab"}),
+			Args:            common.Ptr([]string{"abrgs"}),
+			Resources: &testworkflowsv1.Resources{
+				Requests: map[corev1.ResourceName]testworkflowsv1.ConfigValue{
+					corev1.ResourceMemory: "300m",
+				},
+			},
+			SecurityContext: testworkflowsv1.WorkflowSecurityContextFromKube(&corev1.SecurityContext{
+				Privileged: common.Ptr(true),
+				RunAsUser:  common.Ptr(int64(33)),
+			}),
+		},
+	}
+	stepBaseOperations = testworkflowsv1.StepOperations{
+		Delay: "2m40s",
+		Shell: "shell-to-run",
+		Run: &testworkflowsv1.StepRun{
+			ContainerConfig: testworkflowsv1.ContainerConfig{
+				WorkingDir:      common.Ptr("/abc"),
+				Image:           "im-g",
+				ImagePullPolicy: "IfNotPresent",
+				Env: []testworkflowsv1.EnvVar{
+					{EnvVar: corev1.EnvVar{Name: "abc", Value: "230"}},
+				},
+				EnvFrom: []corev1.EnvFromSource{
+					{Prefix: "abc"},
+				},
+				Command: common.Ptr([]string{"c", "m", "d"}),
+				Args:    common.Ptr([]string{"arg", "s", "d"}),
+				Resources: &testworkflowsv1.Resources{
+					Limits: map[corev1.ResourceName]testworkflowsv1.ConfigValue{
+						corev1.ResourceCPU: "444",
+					},
+				},
+				SecurityContext: testworkflowsv1.WorkflowSecurityContextFromKube(&corev1.SecurityContext{
+					RunAsUser:                common.Ptr(int64(444)),
+					RunAsGroup:               nil,
+					RunAsNonRoot:             common.Ptr(true),
+					ReadOnlyRootFilesystem:   nil,
+					AllowPrivilegeEscalation: nil,
+				}),
+			},
+		},
+		Execute: &testworkflowsv1.StepExecute{
+			Parallelism: 880,
+			Async:       false,
+			Tests:       []testworkflowsv1.StepExecuteTest{{Name: "some-name-test"}},
+			Workflows: []testworkflowsv1.StepExecuteWorkflow{{
+				Name: "some-workflow",
+				As:   "some-alias",
+				Config: map[string]testworkflowsv1.ConfigValue{
+					"id": "xyzz",
+				},
+				Fetch: []testworkflowsv1.StepExecuteFetch{{
+					From:  "some-alias",
+					Paths: []string{"results/**"},
+					To:    "/data/results",
+				}},
+			}},
+		},
+		Artifacts: &testworkflowsv1.StepArtifacts{
+			Compress: &testworkflowsv1.ArtifactCompression{
+				Name: "some-artifact.tar.gz",
+			},
+			Paths: []string{"/get", "/from/there"},
+		},
+		Cache: &testworkflowsv1.StepCache{
+			Key:         "npm-some-key",
+			RestoreKeys: []string{"npm-", "deps-"},
+			Paths:       []string{"node_modules", "/root/.npm"},
+			WorkingDir:  common.Ptr("/data/repo"),
+			Scope:       testworkflowsv1.CacheScopeEnvironment,
+			Mount:       common.Ptr(false),
+		},
+	}
+	step = testworkflowsv1.Step{
+		StepMeta:       stepBaseMeta,
+		StepSource:     stepBaseSource,
+		StepControl:    stepBaseControl,
+		StepOperations: stepBaseOperations,
+		StepDefaults:   stepBaseDefaults,
+		Use: []testworkflowsv1.TemplateRef{
+			{Name: "/abc", Config: map[string]testworkflowsv1.ConfigValue{
+				"xxx": "322",
+			}},
+		},
+		Template: &testworkflowsv1.TemplateRef{
+			Name: "other-one",
+			Config: map[string]testworkflowsv1.ConfigValue{
+				"foo": "bar",
+			},
+		},
+		Steps: []testworkflowsv1.Step{
+			{StepMeta: testworkflowsv1.StepMeta{Name: "xyz"}},
+		},
+	}
+	independentStep = testworkflowsv1.IndependentStep{
+		StepMeta:       stepBaseMeta,
+		StepSource:     stepBaseSource,
+		StepControl:    stepBaseControl,
+		StepOperations: stepBaseOperations,
+		StepDefaults:   stepBaseDefaults,
+		Steps: []testworkflowsv1.IndependentStep{
+			{StepMeta: testworkflowsv1.StepMeta{Name: "xyz"}},
+		},
+	}
+	workflowSpecBase = testworkflowsv1.TestWorkflowSpecBase{
+		Config: map[string]testworkflowsv1.ParameterSchema{
+			"some-key": {
+				Description: "some-description",
+				Type:        "integer",
+				Enum:        []string{"en", "um"},
+				Example:     testworkflowsv1.NewConfigValue("some-vale"),
+				Default:     testworkflowsv1.NewConfigValue("233"),
+				ParameterStringSchema: testworkflowsv1.ParameterStringSchema{
+					Format:    "url",
+					Pattern:   "^abc$",
+					MinLength: common.Ptr(int64(1)),
+					MaxLength: common.Ptr(int64(2)),
+				},
+				ParameterNumberSchema: testworkflowsv1.ParameterNumberSchema{
+					Minimum:          common.Ptr(int64(3)),
+					Maximum:          common.Ptr(int64(4)),
+					ExclusiveMinimum: common.Ptr(int64(5)),
+					ExclusiveMaximum: common.Ptr(int64(7)),
+					MultipleOf:       common.Ptr(int64(8)),
+				},
+			},
+		},
+		Content:   &content,
+		Container: &container,
+		Job: &testworkflowsv1.JobConfig{
+			Labels:      map[string]string{"some-key": "some-value"},
+			Annotations: map[string]string{"some-key=2": "some-value-2"},
+		},
+		Pod: &testworkflowsv1.PodConfig{
+			ServiceAccountName: "some-name",
+			ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "v1"}, {Name: "v2"}},
+			NodeSelector:       map[string]string{"some-key-3": "some-value"},
+			Labels:             map[string]string{"some-key-4": "some-value"},
+			Annotations:        map[string]string{"some-key=5": "some-value-2"},
+			RuntimeClassName:   common.Ptr("gvisor"),
+			SchedulerName:      "volcano",
+			HostUsers:          common.Ptr(false),
+			HostNetwork:        common.Ptr(true),
+			HostIPC:            common.Ptr(true),
+			SetHostnameAsFQDN:  common.Ptr(true),
+		},
+		Events: []testworkflowsv1.Event{
+			{
+				Cronjob: &testworkflowsv1.CronJobConfig{
+					Cron:        "* * * * *",
+					Labels:      map[string]string{"some-key": "some-value"},
+					Annotations: map[string]string{"some-key=2": "some-value-2"},
+					Timezone:    common.Ptr("America/New_York"),
+				},
+			},
+		},
+		Execution: &testworkflowsv1.TestWorkflowExecutionSchema{
+			Tags:  map[string]string{"some-key": "some-value"},
+			Retry: &testworkflowsv1.ExecutionRetryPolicy{Count: 2, On: []testworkflowsv1.ExecutionRetryCause{testworkflowsv1.ExecutionRetryCauseInfrastructure, testworkflowsv1.ExecutionRetryCauseOOM}},
+		},
+		Timeouts: &testworkflowsv1.TestWorkflowTimeouts{
+			Queue:          "30s",
+			Initialization: "60s",
+		},
+	}
+)
+
+func TestMapTestWorkflowBackAndForth(t *testing.T) {
+	want := testworkflowsv1.TestWorkflow{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "TestWorkflow",
+			APIVersion: "testworkflows.testkube.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dummy",
+			Namespace: "dummy-namespace",
+		},
+		Spec: testworkflowsv1.TestWorkflowSpec{
+			Use: []testworkflowsv1.TemplateRef{
+				{
+					Name: "some-name",
+					Config: map[string]testworkflowsv1.ConfigValue{
+						"some-key":   "some-value",
+						"some-key-2": "444",
+					},
+				},
+			},
+			TestWorkflowSpecBase: workflowSpecBase,
+			Setup:                []testworkflowsv1.Step{step},
+			Steps:                []testworkflowsv1.Step{step, step},
+			After:                []testworkflowsv1.Step{step, step, step, step},
+		},
+	}
+	got := MapTestWorkflowAPIToKube(MapTestWorkflowKubeToAPI(*want.DeepCopy()))
+	assert.Equal(t, want, got)
+}
+
+func TestMapEmptyTestWorkflowBackAndForth(t *testing.T) {
+	want := testworkflowsv1.TestWorkflow{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "TestWorkflow",
+			APIVersion: "testworkflows.testkube.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dummy",
+			Namespace: "dummy-namespace",
+		},
+		Spec: testworkflowsv1.TestWorkflowSpec{},
+	}
+	got := MapTestWorkflowAPIToKube(MapTestWorkflowKubeToAPI(*want.DeepCopy()))
+	assert.Equal(t, want, got)
+}
+
+func TestMapTestWorkflowTemplateBackAndForth(t *testing.T) {
+	want := testworkflowsv1.TestWorkflowTemplate{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "TestWorkflowTemplate",
+			APIVersion: "testworkflows.testkube.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dummy",
+			Namespace: "dummy-namespace",
+		},
+		Spec: testworkflowsv1.TestWorkflowTemplateSpec{
+			TestWorkflowSpecBase: workflowSpecBase,
+			Setup:                []testworkflowsv1.IndependentStep{independentStep},
+			Steps:                []testworkflowsv1.IndependentStep{independentStep, independentStep},
+			After:                []testworkflowsv1.IndependentStep{independentStep, independentStep, independentStep, independentStep},
+		},
+	}
+	got := MapTestWorkflowTemplateAPIToKube(MapTestWorkflowTemplateKubeToAPI(*want.DeepCopy()))
+	assert.Equal(t, want, got)
+}
+
+func TestMapEmptyTestWorkflowTemplateBackAndForth(t *testing.T) {
+	want := testworkflowsv1.TestWorkflowTemplate{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "TestWorkflowTemplate",
+			APIVersion: "testworkflows.testkube.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dummy",
+			Namespace: "dummy-namespace",
+		},
+		Spec: testworkflowsv1.TestWorkflowTemplateSpec{},
+	}
+	got := MapTestWorkflowTemplateAPIToKube(MapTestWorkflowTemplateKubeToAPI(*want.DeepCopy()))
+	assert.Equal(t, want, got)
+}
+
+func TestMapSecurityContextRoundTrip(t *testing.T) {
+	// Full SecurityContext with all fields including Capabilities, SeccompProfile, etc.
+	sc := &corev1.SecurityContext{
+		Capabilities: &corev1.Capabilities{
+			Add:  []corev1.Capability{"NET_ADMIN", "SYS_PTRACE"},
+			Drop: []corev1.Capability{"ALL"},
+		},
+		Privileged:               common.Ptr(false),
+		SELinuxOptions:           &corev1.SELinuxOptions{User: "system_u", Role: "system_r", Type: "spc_t", Level: "s0"},
+		RunAsUser:                common.Ptr(int64(1000)),
+		RunAsGroup:               common.Ptr(int64(3000)),
+		RunAsNonRoot:             common.Ptr(true),
+		ReadOnlyRootFilesystem:   common.Ptr(true),
+		AllowPrivilegeEscalation: common.Ptr(false),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+
+	workflowSC := testworkflowsv1.WorkflowSecurityContextFromKube(sc)
+	api := MapSecurityContextKubeToAPI(workflowSC)
+	result := MapSecurityContextAPIToKube(api)
+
+	assert.Equal(t, workflowSC, result)
+}
+
+func TestMapSecurityContextCapabilitiesOnly(t *testing.T) {
+	sc := &corev1.SecurityContext{
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+
+	api := MapSecurityContextKubeToAPI(testworkflowsv1.WorkflowSecurityContextFromKube(sc))
+	result := MapSecurityContextAPIToKube(api)
+
+	assert.NotNil(t, result.Capabilities)
+	assert.Equal(t, []corev1.Capability{"ALL"}, result.Capabilities.Drop)
+}
+
+func TestMapSecurityContextSeccompOnly(t *testing.T) {
+	sc := &corev1.SecurityContext{
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+
+	api := MapSecurityContextKubeToAPI(testworkflowsv1.WorkflowSecurityContextFromKube(sc))
+	result := MapSecurityContextAPIToKube(api)
+
+	assert.NotNil(t, result.SeccompProfile)
+	assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, result.SeccompProfile.Type)
+}
+
+func TestMapSecurityContextNil(t *testing.T) {
+	assert.Nil(t, MapSecurityContextKubeToAPI(nil))
+	assert.Nil(t, MapSecurityContextAPIToKube(nil))
+}
+
+// Both directions of this mapper name every field, so one left out is dropped in
+// silence rather than failing to compile. For baseExecutionId that failure is
+// invisible and total: a workflow stored through the API comes back without it,
+// so what the author wrote as a rerun is scheduled as a first run and the child
+// can only ever take its original branch.
+func TestStepExecuteWorkflowRoundTripsBaseExecutionId(t *testing.T) {
+	kube := testworkflowsv1.StepExecuteWorkflow{
+		Name:            "my-tests",
+		As:              "repeat",
+		BaseExecutionId: "exec-base",
+	}
+
+	api := MapStepExecuteTestWorkflowKubeToAPI(kube)
+	assert.Equal(t, "exec-base", api.BaseExecutionId, "kube -> API dropped the base execution id")
+
+	back := MapStepExecuteTestWorkflowAPIToKube(api)
+	assert.Equal(t, "exec-base", back.BaseExecutionId, "API -> kube dropped the base execution id")
+	assert.Equal(t, kube.BaseExecutionId, back.BaseExecutionId)
+}
+
+func TestMapStepParallelRoundTripsParallelism(t *testing.T) {
+	tests := []struct {
+		name string
+		kube *testworkflowsv1.ConfigValue
+		api  *testkube.BoxedString
+	}{
+		{
+			name: "a static number survives the round trip",
+			kube: testworkflowsv1.NewConfigValue("2"),
+			api:  &testkube.BoxedString{Value: "2"},
+		},
+		{
+			name: "an expression survives the round trip",
+			kube: testworkflowsv1.NewConfigValue("config.PARALLELISM"),
+			api:  &testkube.BoxedString{Value: "config.PARALLELISM"},
+		},
+		{name: "an unset parallelism stays nil"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			api := MapStepParallelKubeToAPI(testworkflowsv1.StepParallel{Parallelism: tc.kube})
+			assert.Equal(t, tc.api, api.Parallelism)
+			assert.Equal(t, tc.kube, MapStepParallelAPIToKube(api).Parallelism)
+
+			independentAPI := MapIndependentStepParallelKubeToAPI(testworkflowsv1.IndependentStepParallel{Parallelism: tc.kube})
+			assert.Equal(t, tc.api, independentAPI.Parallelism)
+			assert.Equal(t, tc.kube, MapIndependentStepParallelAPIToKube(independentAPI).Parallelism)
+		})
+	}
+}
+
+func TestMapPodConfigResourcesRoundTrip(t *testing.T) {
+	tests := []struct {
+		name      string
+		resources *testworkflowsv1.Resources
+	}{
+		{
+			name: "keeps cpu and memory",
+			resources: &testworkflowsv1.Resources{
+				Requests: map[corev1.ResourceName]testworkflowsv1.ConfigValue{corev1.ResourceCPU: "200m", corev1.ResourceMemory: "256Mi"},
+				Limits:   map[corev1.ResourceName]testworkflowsv1.ConfigValue{corev1.ResourceCPU: "1", corev1.ResourceMemory: "512Mi"},
+			},
+		},
+		{
+			name: "keeps hugepages",
+			resources: &testworkflowsv1.Resources{
+				Requests: map[corev1.ResourceName]testworkflowsv1.ConfigValue{"hugepages-2Mi": "64Mi"},
+				Limits:   map[corev1.ResourceName]testworkflowsv1.ConfigValue{"hugepages-2Mi": "128Mi", "hugepages-1Gi": "{{config.pages}}"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := testworkflowsv1.PodConfig{Resources: tt.resources}
+
+			assert.Equal(t, v, MapPodConfigAPIToKube(MapPodConfigKubeToAPI(v)))
+		})
+	}
+}

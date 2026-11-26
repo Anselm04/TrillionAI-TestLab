@@ -1,0 +1,151 @@
+package runner
+
+import (
+	"context"
+
+	"github.com/pkg/errors"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/kubeshop/testkube/internal/config"
+	"github.com/kubeshop/testkube/pkg/controlplaneclient"
+	"github.com/kubeshop/testkube/pkg/event"
+	"github.com/kubeshop/testkube/pkg/log"
+	"github.com/kubeshop/testkube/pkg/testworkflows/executionworker/controller"
+	"github.com/kubeshop/testkube/pkg/testworkflows/executionworker/executionworkertypes"
+	"github.com/kubeshop/testkube/pkg/testworkflows/executionworker/registry"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowconfig"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/stage"
+)
+
+type Options struct {
+	ClusterID           string
+	DefaultNamespace    string
+	ServiceAccountNames map[string]string
+
+	StorageSkipVerify bool
+
+	GlobalTemplate GlobalTemplateFactory
+}
+
+type service struct {
+	logger             *zap.SugaredLogger
+	eventsEmitter      event.Interface
+	client             controlplaneclient.Client
+	controlPlaneConfig testworkflowconfig.ControlPlaneConfig
+	proContext         config.ProContext
+	worker             executionworkertypes.Worker
+	runner             Runner
+	opts               Options
+}
+
+type Service interface {
+	Execute(request executionworkertypes.ExecuteRequest) (*executionworkertypes.ExecuteResult, error)
+	Start(ctx context.Context, withRunnerRequests bool) error
+}
+
+func NewService(
+	logger *zap.SugaredLogger,
+	eventsEmitter event.Interface,
+	client controlplaneclient.Client,
+	controlPlaneConfig testworkflowconfig.ControlPlaneConfig,
+	proContext config.ProContext,
+	executionWorker executionworkertypes.Worker,
+	opts Options,
+	runner Runner,
+) Service {
+	return &service{
+		logger:             logger,
+		eventsEmitter:      eventsEmitter,
+		client:             client,
+		controlPlaneConfig: controlPlaneConfig,
+		proContext:         proContext,
+		worker:             executionWorker,
+		opts:               opts,
+		runner:             runner,
+	}
+}
+
+func (s *service) reattach(ctx context.Context) (err error) {
+	executions, err := s.client.GetRunnerOngoingExecutions(ctx)
+	if err != nil {
+		log.DefaultLogger.Errorw("failed to get runner executions", "error", err)
+		return
+	}
+
+	for _, exec := range executions {
+		go func(environmentId string, executionId string) {
+			err := s.runner.Monitor(context.Background(), s.proContext.OrgID, environmentId, executionId)
+			if err == nil {
+				s.logger.Infow("Reattached execution", "executionId", executionId)
+				return
+			}
+			if !errors.Is(err, registry.ErrResourceNotFound) && !errors.Is(err, controller.ErrJobAborted) {
+				s.logger.Errorw("failed to monitor execution", "executionId", executionId, "error", err)
+				return
+			}
+
+			s.logger.Warnw("execution to monitor not found. reattaching again.", "executionId", executionId, "error", err)
+
+			// Get the existing execution
+			execution, err := s.client.GetExecution(ctx, environmentId, executionId)
+			if err != nil {
+				s.logger.Errorw("failed to reattach to execution: getting execution", "executionId", executionId, "error", err)
+				return
+			}
+
+			// Enrich logs with human-readable context now that the execution is loaded.
+			logger := s.logger.With(execution.LogFields()...)
+
+			// Ignore if it's still queued - orchestrator will reattach to it later
+			if execution.Result.IsQueued() {
+				logger.Warnw("execution to monitor is still queued: leaving it for orchestrator")
+				return
+			}
+
+			// Finalize and save the result
+			sigSequence := stage.MapSignatureListToInternal(stage.MapSignatureToSequence(stage.MapSignatureList(execution.Signature)))
+			cause, causeReason := recordedCause(execution.Result, sigSequence)
+			healRecoveredResult(execution.Result, sigSequence, execution.ScheduledAt, cause, causeReason)
+			if err = s.client.FinishExecutionResult(ctx, environmentId, executionId, execution.Result); err != nil {
+				logger.Errorw("failed to recover execution: saving execution", "error", err)
+			} else {
+				logger.Infow("recovered execution")
+			}
+		}(exec.EnvironmentId, exec.Id)
+	}
+
+	return
+}
+
+func (s *service) start(ctx context.Context, withRunnerRequests bool) (err error) {
+	return newAgentLoop(
+		s.runner,
+		s.worker,
+		s.logger,
+		s.eventsEmitter,
+		s.client,
+		s.controlPlaneConfig, // TODO: fetch it from the control plane?
+		s.proContext,
+		s.proContext.OrgID,
+		s.proContext.EnvID,
+	).Start(ctx, withRunnerRequests)
+}
+
+func (s *service) Start(ctx context.Context, withRunnerRequests bool) error {
+	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		return s.reattach(ctx)
+	})
+
+	g.Go(func() error {
+		return s.start(ctx, withRunnerRequests)
+	})
+
+	return g.Wait()
+}
+
+func (s *service) Execute(request executionworkertypes.ExecuteRequest) (*executionworkertypes.ExecuteResult, error) {
+	return s.runner.Execute(request)
+}

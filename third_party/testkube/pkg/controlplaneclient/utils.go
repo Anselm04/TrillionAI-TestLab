@@ -1,0 +1,882 @@
+package controlplaneclient
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/metadata"
+
+	"github.com/kubeshop/testkube/pkg/grpcutils"
+
+	"github.com/kubeshop/testkube/cmd/testworkflow-init/constants"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/cloud"
+)
+
+var (
+	grpcOpts = []grpc.CallOption{grpc.UseCompressor(gzip.Name), grpc.MaxCallRecvMsgSize(math.MaxInt32)}
+)
+
+// TODO: add timeout?
+func call[Request any, Response any](ctx context.Context, md metadata.MD, fn func(context.Context, Request, ...grpc.CallOption) (Response, error), req Request) (Response, error) {
+	if ctx.Err() != nil {
+		var v Response
+		return v, ctx.Err()
+	}
+	return fn(metadata.NewOutgoingContext(ctx, md), req, grpcOpts...)
+}
+
+// callRetryCount and callRetryBaseDelay bound the retry loop that wraps
+// transient-error-prone gRPC calls (see callWithRetry). The window is small
+// on purpose: the caller of a periodic poll (e.g. the trigger watcher) will
+// re-invoke on the next tick, so absorbing a short blip here beats logging
+// an error and waiting for the next tick. Exported to var so tests can shrink
+// the sleep.
+var (
+	callRetryCount     = 3
+	callRetryBaseDelay = 250 * time.Millisecond
+)
+
+// callWithRetry wraps call with a bounded retry loop that reacts only to
+// transient gRPC codes (Unavailable, DeadlineExceeded, ResourceExhausted).
+// Any other error short-circuits so the caller sees, for example, a
+// PermissionDenied without the retry loop swallowing time. Respects context
+// cancellation during backoff.
+func callWithRetry[Request any, Response any](
+	ctx context.Context,
+	md metadata.MD,
+	fn func(context.Context, Request, ...grpc.CallOption) (Response, error),
+	req Request,
+) (Response, error) {
+	var (
+		v       Response
+		lastErr error
+	)
+	for attempt := 0; attempt < callRetryCount; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return v, ctx.Err()
+			case <-time.After(time.Duration(attempt) * callRetryBaseDelay):
+			}
+		}
+		v, lastErr = call(ctx, md, fn, req)
+		if lastErr == nil {
+			return v, nil
+		}
+		if !isRetryableGrpcCode(getGrpcErrorCode(lastErr)) {
+			return v, lastErr
+		}
+	}
+	return v, lastErr
+}
+
+func isRetryableGrpcCode(code codes.Code) bool {
+	return grpcutils.IsRetryableCode(code)
+}
+
+// TODO: add timeout?
+func watch[Response any](ctx context.Context, md metadata.MD, fn func(context.Context, ...grpc.CallOption) (Response, error)) (Response, error) {
+	if ctx.Err() != nil {
+		var v Response
+		return v, ctx.Err()
+	}
+	return fn(metadata.NewOutgoingContext(ctx, md), grpcOpts...)
+}
+
+func getGrpcErrorCode(err error) codes.Code {
+	return grpcutils.ErrorCode(err)
+}
+
+type notificationRequest interface {
+	GetRequestType() cloud.TestWorkflowNotificationsRequestType
+	GetStreamId() string
+	GetResumeAfterSeqNo() uint32
+}
+
+type notificationSrv[Request any, Response any] interface {
+	Send(Response) error
+	Recv() (Request, error)
+}
+
+const (
+	workflowNotificationHeartbeatInterval = 20 * time.Second
+	workflowNotificationReplayMaxEvents   = 10_000
+	workflowNotificationReplayMaxBytes    = 10 * 1024 * 1024
+	workflowNotificationSessionIdleTTL    = 15 * time.Minute
+	workflowNotificationSweepInterval     = 60 * time.Second
+)
+
+type notificationStreamEvent struct {
+	seqNo        uint32
+	notification *testkube.TestWorkflowExecutionNotification
+}
+
+func notificationResumable(notification *testkube.TestWorkflowExecutionNotification) bool {
+	if notification == nil || notification.Temporary {
+		return false
+	}
+	return notification.Result != nil || notification.Output != nil || notification.Log != ""
+}
+
+type notificationStreamSubscription struct {
+	id        uint64
+	ch        chan notificationStreamEvent
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newNotificationStreamSubscription(id uint64) *notificationStreamSubscription {
+	return &notificationStreamSubscription{
+		id:   id,
+		ch:   make(chan notificationStreamEvent, 256),
+		done: make(chan struct{}),
+	}
+}
+
+func (s *notificationStreamSubscription) send(event notificationStreamEvent) {
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+	select {
+	case s.ch <- event:
+	case <-s.done:
+	}
+}
+
+func (s *notificationStreamSubscription) close() {
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+}
+
+type notificationStreamSession struct {
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	nextSeqNo   uint32
+	replay      []notificationStreamEvent
+	replayBytes int
+	subscribers map[uint64]*notificationStreamSubscription
+	done        bool
+	errored     bool
+	lastSeqNo   uint32
+	lastActive  time.Time
+	limits      notificationReplayLimits
+}
+
+// notificationReplayLimits bounds a session's replay buffer. The oldest events
+// are dropped once either bound is exceeded.
+type notificationReplayLimits struct {
+	maxEvents int
+	maxBytes  int
+}
+
+func defaultNotificationReplayLimits() notificationReplayLimits {
+	return notificationReplayLimits{
+		maxEvents: workflowNotificationReplayMaxEvents,
+		maxBytes:  workflowNotificationReplayMaxBytes,
+	}
+}
+
+func newNotificationStreamSession(limits notificationReplayLimits) *notificationStreamSession {
+	return &notificationStreamSession{
+		nextSeqNo:   1,
+		subscribers: make(map[uint64]*notificationStreamSubscription),
+		lastActive:  time.Now(),
+		limits:      limits,
+	}
+}
+
+func (s *notificationStreamSession) subscribe(resumeAfterSeqNo uint32, subscriptionID uint64) (*notificationStreamSubscription, []notificationStreamEvent, bool, uint32, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lastActive = time.Now()
+	sub := newNotificationStreamSubscription(subscriptionID)
+	if !s.done {
+		s.subscribers[sub.id] = sub
+	}
+
+	replay, available := s.replayAfterLocked(resumeAfterSeqNo)
+	return sub, replay, available, s.lastSeqNo, s.done
+}
+
+func (s *notificationStreamSession) unsubscribe(sub *notificationStreamSubscription) {
+	s.mu.Lock()
+	removed, ok := s.subscribers[sub.id]
+	if ok {
+		delete(s.subscribers, sub.id)
+	}
+	s.mu.Unlock()
+	if ok {
+		removed.close()
+	}
+}
+
+func (s *notificationStreamSession) publish(notification *testkube.TestWorkflowExecutionNotification) {
+	if notification == nil {
+		return
+	}
+
+	var subscribers []*notificationStreamSubscription
+	s.mu.Lock()
+	s.lastActive = time.Now()
+	seqNo := uint32(0)
+	if notificationResumable(notification) {
+		seqNo = s.nextSeqNo
+		s.nextSeqNo++
+		s.lastSeqNo = seqNo
+	}
+
+	event := notificationStreamEvent{
+		seqNo:        seqNo,
+		notification: notification,
+	}
+	if seqNo > 0 {
+		s.replay = append(s.replay, event)
+		s.replayBytes += approximateNotificationBytes(notification)
+		for len(s.replay) > s.limits.maxEvents || s.replayBytes > s.limits.maxBytes {
+			s.replayBytes -= approximateNotificationBytes(s.replay[0].notification)
+			s.replay[0].notification = nil
+			s.replay = s.replay[1:]
+		}
+	}
+
+	for _, sub := range s.subscribers {
+		subscribers = append(subscribers, sub)
+	}
+	s.mu.Unlock()
+
+	for _, sub := range subscribers {
+		sub.send(event)
+	}
+}
+
+func (s *notificationStreamSession) close(errored bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.done {
+		return
+	}
+	s.done = true
+	s.errored = errored
+	s.lastActive = time.Now()
+	for id, sub := range s.subscribers {
+		sub.close()
+		delete(s.subscribers, id)
+	}
+}
+
+// stopSource cancels the session's pod-log source. It runs when the session is
+// removed from the manager (replaced on a resume-from-zero, or evicted) so an
+// orphaned source does not keep running until the execution ends, and in
+// runSource's defer to release the derived context. Safe to call more than once.
+func (s *notificationStreamSession) stopSource() {
+	s.mu.Lock()
+	cancel := s.cancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *notificationStreamSession) currentSeqNo() uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSeqNo
+}
+
+func (s *notificationStreamSession) status() (done bool, errored bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.done, s.errored
+}
+
+func (s *notificationStreamSession) replayAfterLocked(resumeAfterSeqNo uint32) ([]notificationStreamEvent, bool) {
+	if resumeAfterSeqNo == 0 {
+		return nil, true
+	}
+	if len(s.replay) == 0 {
+		return nil, resumeAfterSeqNo >= s.lastSeqNo
+	}
+
+	earliest := s.replay[0].seqNo
+	if resumeAfterSeqNo < earliest-1 {
+		return nil, false
+	}
+
+	var replay []notificationStreamEvent
+	for _, event := range s.replay {
+		if event.seqNo > resumeAfterSeqNo {
+			replay = append(replay, event)
+		}
+	}
+	return replay, true
+}
+
+func (s *notificationStreamSession) expired(now time.Time, ttl time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.done && now.Sub(s.lastActive) >= ttl
+}
+
+func approximateNotificationBytes(notification *testkube.TestWorkflowExecutionNotification) int {
+	if notification == nil {
+		return 0
+	}
+	b, err := json.Marshal(notification)
+	if err != nil {
+		return len(notification.Log)
+	}
+	return len(b)
+}
+
+func sendNotificationResponse[Response any](ctx context.Context, responses chan<- Response, response Response) error {
+	select {
+	case responses <- response:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type notificationStreamSessionManager[Request notificationRequest] struct {
+	// ctx is the long-lived agent context, NOT the per-connection gRPC stream context.
+	// runSource runs under it so a session's pod-log source and replay buffer survive a
+	// gRPC reconnect: the next attach with the same streamId finds the live session and
+	// replays from the cursor instead of falling back to resume_unavailable.
+	ctx            context.Context
+	mu             sync.Mutex
+	nextID         atomic.Uint64
+	sessions       map[string]*notificationStreamSession
+	sessionIdleTTL time.Duration
+	replayLimits   notificationReplayLimits
+	kind           string
+	key            func(Request) string
+	process        func(ctx context.Context, req Request) NotificationWatcher
+}
+
+func newNotificationStreamSessionManager[Request notificationRequest](
+	ctx context.Context,
+	kind string,
+	key func(Request) string,
+	process func(ctx context.Context, req Request) NotificationWatcher,
+) *notificationStreamSessionManager[Request] {
+	m := &notificationStreamSessionManager[Request]{
+		ctx:            ctx,
+		sessions:       make(map[string]*notificationStreamSession),
+		sessionIdleTTL: workflowNotificationSessionIdleTTL,
+		replayLimits:   defaultNotificationReplayLimits(),
+		kind:           kind,
+		key:            key,
+		process:        process,
+	}
+	liveLogMetrics.add(m)
+	go m.runSweeper(workflowNotificationSweepInterval)
+	return m
+}
+
+// runSweeper reclaims expired sessions on a fixed interval regardless of attach
+// traffic. This covers a manager that goes idle (attach never runs to sweep) and a
+// done session re-attached near its TTL boundary that escapes scheduleExpiration's
+// single AfterFunc. It stops when the manager's context is done, and the manager
+// leaves the metrics collector at that point.
+func (m *notificationStreamSessionManager[Request]) runSweeper(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			liveLogMetrics.remove(m)
+			return
+		case <-ticker.C:
+			m.sweepExpired(time.Now())
+		}
+	}
+}
+
+func (m *notificationStreamSessionManager[Request]) liveLogKind() string {
+	return m.kind
+}
+
+// liveLogStats reads the manager's gauges from its sessions. The collector calls
+// it at scrape time, so the gauges cannot drift from the sessions map.
+func (m *notificationStreamSessionManager[Request]) liveLogStats() liveLogStats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var stats liveLogStats
+	for _, session := range m.sessions {
+		session.mu.Lock()
+		if session.done {
+			stats.doneSessions++
+		} else {
+			stats.activeSessions++
+		}
+		stats.subscribers += len(session.subscribers)
+		stats.replayBytes += session.replayBytes
+		session.mu.Unlock()
+	}
+	return stats
+}
+
+// removeSessionLocked is the only way a session leaves the sessions map, so every
+// eviction is counted once with its reason. The caller holds m.mu.
+func (m *notificationStreamSessionManager[Request]) removeSessionLocked(key string, session *notificationStreamSession, reason string) {
+	if m.sessions[key] != session {
+		return
+	}
+	delete(m.sessions, key)
+	liveLogSessionsEvictedTotal.WithLabelValues(m.kind, reason).Inc()
+}
+
+func (m *notificationStreamSessionManager[Request]) sessionKey(req Request) string {
+	key := m.key(req)
+	if req.GetStreamId() == "" {
+		return key
+	}
+	return fmt.Sprintf("%s:%s", key, req.GetStreamId())
+}
+
+// sweepExpired removes every session that is done and past the idle TTL as of now.
+func (m *notificationStreamSessionManager[Request]) sweepExpired(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for sessionKey, session := range m.sessions {
+		if session.expired(now, m.sessionIdleTTL) {
+			m.removeSessionLocked(sessionKey, session, liveLogEvictionReasonTTL)
+		}
+	}
+}
+
+func (m *notificationStreamSessionManager[Request]) attach(req Request) (*notificationStreamSession, *notificationStreamSubscription, []notificationStreamEvent, bool, uint32, bool) {
+	key := m.sessionKey(req)
+	now := time.Now()
+
+	m.sweepExpired(now)
+
+	m.mu.Lock()
+	// A resume-from-zero request abandons any existing session under this key (the
+	// client reset after resume_unavailable). Capture it so its source can be
+	// stopped: once replaced in the map it is unreachable and would otherwise run
+	// orphaned until the execution ends.
+	var replaced *notificationStreamSession
+	session := m.sessions[key]
+	if req.GetResumeAfterSeqNo() == 0 {
+		if session != nil {
+			m.removeSessionLocked(key, session, liveLogEvictionReasonReplaced)
+		}
+		replaced = session
+		session = nil
+	} else if session != nil {
+		done, errored := session.status()
+		if done && errored {
+			m.removeSessionLocked(key, session, liveLogEvictionReasonErrored)
+			session = nil
+		}
+	}
+	freshSession := false
+	var sourceCtx context.Context
+	if session == nil {
+		session = newNotificationStreamSession(m.replayLimits)
+		sourceCtx, session.cancel = context.WithCancel(m.ctx)
+		m.sessions[key] = session
+		freshSession = true
+		liveLogSessionsCreatedTotal.WithLabelValues(m.kind).Inc()
+	}
+	subscriptionID := m.nextID.Add(1)
+	m.mu.Unlock()
+
+	if replaced != nil {
+		replaced.stopSource()
+	}
+
+	subscribeAfterSeqNo := req.GetResumeAfterSeqNo()
+	if freshSession && req.GetResumeAfterSeqNo() > 0 {
+		subscribeAfterSeqNo = 0
+	}
+	sub, replay, available, lastSeqNo, done := session.subscribe(subscribeAfterSeqNo, subscriptionID)
+	if freshSession {
+		liveOnlyAfter := time.Time{}
+		if req.GetResumeAfterSeqNo() > 0 {
+			liveOnlyAfter = time.Now()
+		}
+		go m.runSource(sourceCtx, key, session, req, liveOnlyAfter)
+		if req.GetResumeAfterSeqNo() > 0 {
+			available = false
+		}
+	}
+	if req.GetResumeAfterSeqNo() > 0 {
+		result := "unavailable"
+		if available {
+			result = "available"
+		}
+		liveLogResumeTotal.WithLabelValues(m.kind, result).Inc()
+	}
+	return session, sub, replay, available, lastSeqNo, done
+}
+
+func (m *notificationStreamSessionManager[Request]) scheduleExpiration(key string, session *notificationStreamSession) {
+	time.AfterFunc(m.sessionIdleTTL, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		if session.expired(time.Now(), m.sessionIdleTTL) {
+			m.removeSessionLocked(key, session, liveLogEvictionReasonTTL)
+		}
+	})
+}
+
+func shouldPublishLiveResumeNotification(notification *testkube.TestWorkflowExecutionNotification, attachedAt time.Time) bool {
+	if !notificationResumable(notification) {
+		return false
+	}
+	if notification.Ts.IsZero() {
+		return false
+	}
+	return !notification.Ts.Before(attachedAt)
+}
+
+func (m *notificationStreamSessionManager[Request]) runSource(ctx context.Context, key string, session *notificationStreamSession, req Request, liveOnlyAfter time.Time) {
+	started := time.Now()
+	var sourceErr error
+	defer func() {
+		session.close(sourceErr != nil)
+		session.stopSource()
+		result := liveLogResultOK
+		if sourceErr != nil {
+			result = liveLogResultError
+		}
+		liveLogSourceDurationSeconds.WithLabelValues(m.kind, result).Observe(time.Since(started).Seconds())
+		m.scheduleExpiration(key, session)
+	}()
+
+	watcher := m.process(ctx, req)
+	for notification := range watcher.Channel() {
+		if !liveOnlyAfter.IsZero() && !shouldPublishLiveResumeNotification(notification, liveOnlyAfter) {
+			continue
+		}
+		session.publish(notification)
+	}
+	sourceErr = watcher.Err()
+	if sourceErr != nil {
+		session.publish(&testkube.TestWorkflowExecutionNotification{
+			Ts:        time.Now(),
+			EventType: "error",
+			Log:       fmt.Sprintf("%s %s", time.Now().Format(constants.PreciseTimeFormat), sourceErr.Error()),
+		})
+	}
+}
+
+func processNotifications[Request notificationRequest, Response any, Srv notificationSrv[Request, Response]](
+	ctx context.Context,
+	md metadata.MD,
+	fn func(context.Context, ...grpc.CallOption) (Srv, error),
+	buildPongNotification func(streamId string) Response,
+	buildNotification func(streamId string, seqNo uint32, notification *testkube.TestWorkflowExecutionNotification) Response,
+	buildError func(streamId string, message string) Response,
+	buildProtocol func(streamId string, seqNo uint32, notificationType cloud.TestWorkflowNotificationType, message string) Response,
+	sessionManager *notificationStreamSessionManager[Request],
+	sendTimeout time.Duration,
+	recvTimeout time.Duration,
+	logger *zap.SugaredLogger,
+) error {
+	g, ctx := errgroup.WithContext(ctx)
+	stream, err := watch(ctx, md, fn)
+	if err != nil {
+		return err
+	}
+
+	responses := make(chan Response, 5)
+	sendResponse := func(response Response) error {
+		return sendNotificationResponse(ctx, responses, response)
+	}
+
+	// Send responses in sequence
+	// GRPC stream have special requirements for concurrency on SendMsg, and RecvMsg calls.
+	// Please check https://github.com/grpc/grpc-go/blob/master/Documentation/concurrency.md
+	g.Go(func() error {
+		for msg := range responses {
+			errChan := make(chan error, 1)
+			go func() {
+				errChan <- stream.Send(msg)
+				close(errChan)
+			}()
+
+			t := time.NewTimer(sendTimeout)
+
+			select {
+			case err := <-errChan:
+				t.Stop()
+				if err != nil {
+					return err
+				}
+			case <-ctx.Done():
+				t.Stop()
+				return ctx.Err()
+			case <-t.C:
+				return fmt.Errorf("send response too slow")
+			}
+		}
+		return nil
+	})
+
+	// Process the requests
+	g.Go(func() error {
+		var wg sync.WaitGroup
+		// activeStreams dedups subscriptions by session key. The control plane re-asserts
+		// the same stream request periodically so a dropped connection self-heals; while a
+		// subscription is already live it already covers that stream, so a duplicate
+		// request is ignored to avoid double-delivering notifications.
+		activeStreams := make(map[string]struct{})
+		var activeStreamsMu sync.Mutex
+		defer func() {
+			wg.Wait()
+			close(responses)
+		}()
+		for {
+			// Take the context error if possible
+			if err == nil && ctx.Err() != nil {
+				err = ctx.Err()
+			}
+
+			// Handle the error
+			if err != nil {
+				return err
+			}
+
+			// Get the next request
+			var req Request
+			reqChan := make(chan struct {
+				req Request
+				err error
+			}, 1)
+			go func() {
+				recvReq, recvErr := stream.Recv()
+				reqChan <- struct {
+					req Request
+					err error
+				}{recvReq, recvErr}
+			}()
+
+			select {
+			case result := <-reqChan:
+				req = result.req
+				err = result.err
+				if err != nil {
+					return err
+				}
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(recvTimeout):
+				err = errors.New("receive request too slow")
+				return err
+			}
+
+			// Send PONG to the PING message
+			if req.GetRequestType() == cloud.TestWorkflowNotificationsRequestType_WORKFLOW_STREAM_HEALTH_CHECK {
+				if err = sendResponse(buildPongNotification(req.GetStreamId())); err != nil {
+					return err
+				}
+				continue
+			}
+
+			// Start reading the notifications. Ignore a request whose session is already
+			// being streamed on this connection (the control plane re-asserts requests to
+			// self-heal, so duplicates are expected while a subscription is live).
+			streamKey := sessionManager.sessionKey(req)
+			activeStreamsMu.Lock()
+			if _, streaming := activeStreams[streamKey]; streaming {
+				activeStreamsMu.Unlock()
+				continue
+			}
+			activeStreams[streamKey] = struct{}{}
+			activeStreamsMu.Unlock()
+
+			wg.Add(1)
+			g.Go(func(req Request) func() error {
+				return func() error {
+					defer wg.Done()
+					defer func() {
+						activeStreamsMu.Lock()
+						delete(activeStreams, streamKey)
+						activeStreamsMu.Unlock()
+					}()
+
+					session, sub, replay, resumeAvailable, lastSeqNo, done := sessionManager.attach(req)
+					defer session.unsubscribe(sub)
+
+					// READY means the agent accepted this request and attached it to a logical stream session.
+					// It does not imply the Kubernetes log source has already produced data.
+					if err := sendResponse(buildProtocol(req.GetStreamId(), lastSeqNo, cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_READY, "")); err != nil {
+						return err
+					}
+					if !resumeAvailable {
+						if err := sendResponse(buildProtocol(req.GetStreamId(), lastSeqNo, cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_RESUME_UNAVAILABLE, "")); err != nil {
+							return err
+						}
+					}
+					for _, event := range replay {
+						if err := sendResponse(buildNotification(req.GetStreamId(), event.seqNo, event.notification)); err != nil {
+							return err
+						}
+					}
+					if done {
+						return nil
+					}
+
+					heartbeat := time.NewTicker(workflowNotificationHeartbeatInterval)
+					defer heartbeat.Stop()
+					drainSubscription := func() error {
+						for {
+							select {
+							case event := <-sub.ch:
+								if err := sendResponse(buildNotification(req.GetStreamId(), event.seqNo, event.notification)); err != nil {
+									return err
+								}
+							default:
+								return nil
+							}
+						}
+					}
+					for {
+						select {
+						case event := <-sub.ch:
+							if err := sendResponse(buildNotification(req.GetStreamId(), event.seqNo, event.notification)); err != nil {
+								return err
+							}
+						case <-sub.done:
+							return drainSubscription()
+						case <-heartbeat.C:
+							if err := sendResponse(buildProtocol(req.GetStreamId(), session.currentSeqNo(), cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_HEARTBEAT, "")); err != nil {
+								return err
+							}
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+				}
+			}(req))
+		}
+	})
+
+	return g.Wait()
+}
+
+func buildCloudNotification(streamId string, seqNo uint32, notification *testkube.TestWorkflowExecutionNotification) *cloud.TestWorkflowNotificationsResponse {
+	response := &cloud.TestWorkflowNotificationsResponse{
+		StreamId:  streamId,
+		SeqNo:     seqNo,
+		Timestamp: notification.Ts.Format(time.RFC3339Nano),
+		Ref:       notification.Ref,
+	}
+	if notification.Result != nil {
+		m, _ := json.Marshal(notification.Result)
+		response.Type = cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_RESULT
+		response.Message = string(m)
+	} else if notification.Output != nil {
+		m, _ := json.Marshal(notification.Output)
+		response.Type = cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_OUTPUT
+		response.Message = string(m)
+	} else if notification.EventType == "error" {
+		response.Type = cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_ERROR
+		response.Message = notification.Log
+	} else {
+		response.Type = cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_LOG
+		response.Message = notification.Log
+	}
+	return response
+}
+
+func buildCloudError(streamId string, message string) *cloud.TestWorkflowNotificationsResponse {
+	ts := time.Now()
+	return &cloud.TestWorkflowNotificationsResponse{
+		StreamId:  streamId,
+		SeqNo:     0,
+		Timestamp: ts.Format(time.RFC3339Nano),
+		Type:      cloud.TestWorkflowNotificationType_WORKFLOW_STREAM_ERROR,
+		Message:   fmt.Sprintf("%s %s", ts.Format(constants.PreciseTimeFormat), message),
+	}
+}
+
+func buildCloudProtocol(streamId string, seqNo uint32, notificationType cloud.TestWorkflowNotificationType, message string) *cloud.TestWorkflowNotificationsResponse {
+	return &cloud.TestWorkflowNotificationsResponse{
+		StreamId:  streamId,
+		SeqNo:     seqNo,
+		Timestamp: time.Now().Format(time.RFC3339Nano),
+		Type:      notificationType,
+		Message:   message,
+	}
+}
+
+func convertCloudResponseToService(response *cloud.TestWorkflowNotificationsResponse) *cloud.TestWorkflowServiceNotificationsResponse {
+	return &cloud.TestWorkflowServiceNotificationsResponse{
+		StreamId:  response.StreamId,
+		SeqNo:     response.SeqNo,
+		Timestamp: response.Timestamp,
+		Ref:       response.Ref,
+		Type:      response.Type,
+		Message:   response.Message,
+	}
+}
+
+func buildServiceCloudNotification(streamId string, seqNo uint32, notification *testkube.TestWorkflowExecutionNotification) *cloud.TestWorkflowServiceNotificationsResponse {
+	return convertCloudResponseToService(buildCloudNotification(streamId, seqNo, notification))
+}
+
+func buildServiceCloudError(streamId string, message string) *cloud.TestWorkflowServiceNotificationsResponse {
+	return convertCloudResponseToService(buildCloudError(streamId, message))
+}
+
+func buildServiceCloudProtocol(streamId string, seqNo uint32, notificationType cloud.TestWorkflowNotificationType, message string) *cloud.TestWorkflowServiceNotificationsResponse {
+	return convertCloudResponseToService(buildCloudProtocol(streamId, seqNo, notificationType, message))
+}
+
+func buildPongNotification(streamId string) *cloud.TestWorkflowNotificationsResponse {
+	return &cloud.TestWorkflowNotificationsResponse{StreamId: streamId, SeqNo: 0}
+}
+
+func buildParallelStepPongNotification(streamId string) *cloud.TestWorkflowParallelStepNotificationsResponse {
+	return &cloud.TestWorkflowParallelStepNotificationsResponse{StreamId: streamId, SeqNo: 0}
+}
+
+func buildServicePongNotification(streamId string) *cloud.TestWorkflowServiceNotificationsResponse {
+	return &cloud.TestWorkflowServiceNotificationsResponse{StreamId: streamId, SeqNo: 0}
+}
+
+func convertCloudResponseToParallelStep(response *cloud.TestWorkflowNotificationsResponse) *cloud.TestWorkflowParallelStepNotificationsResponse {
+	return &cloud.TestWorkflowParallelStepNotificationsResponse{
+		StreamId:  response.StreamId,
+		SeqNo:     response.SeqNo,
+		Timestamp: response.Timestamp,
+		Ref:       response.Ref,
+		Type:      response.Type,
+		Message:   response.Message,
+	}
+}
+
+func buildParallelStepCloudNotification(streamId string, seqNo uint32, notification *testkube.TestWorkflowExecutionNotification) *cloud.TestWorkflowParallelStepNotificationsResponse {
+	return convertCloudResponseToParallelStep(buildCloudNotification(streamId, seqNo, notification))
+}
+
+func buildParallelStepCloudError(streamId string, message string) *cloud.TestWorkflowParallelStepNotificationsResponse {
+	return convertCloudResponseToParallelStep(buildCloudError(streamId, message))
+}
+
+func buildParallelStepCloudProtocol(streamId string, seqNo uint32, notificationType cloud.TestWorkflowNotificationType, message string) *cloud.TestWorkflowParallelStepNotificationsResponse {
+	return convertCloudResponseToParallelStep(buildCloudProtocol(streamId, seqNo, notificationType, message))
+}

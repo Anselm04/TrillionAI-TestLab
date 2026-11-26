@@ -1,0 +1,757 @@
+package testworkflowprocessor
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/pkg/errors"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	testworkflowsv1 "github.com/kubeshop/testkube/api/testworkflows/v1"
+	initconstants "github.com/kubeshop/testkube/cmd/testworkflow-init/constants"
+	"github.com/kubeshop/testkube/internal/common"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/expressions"
+	"github.com/kubeshop/testkube/pkg/imageinspector"
+	"github.com/kubeshop/testkube/pkg/testworkflows/executionworker/executionworkertypes"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowconfig"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/action"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/action/actiontypes"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/action/actiontypes/lite"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/constants"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/stage"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowresolver"
+	"github.com/kubeshop/testkube/pkg/utils"
+)
+
+//go:generate go tool mockgen -destination=./mock_processor.go -package=testworkflowprocessor "github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor" Processor
+type Processor interface {
+	Register(operation Operation) Processor
+	Bundle(ctx context.Context, workflow *testworkflowsv1.TestWorkflow, options BundleOptions, machines ...expressions.Machine) (*Bundle, error)
+}
+
+//go:generate go tool mockgen -destination=./mock_internalprocessor.go -package=testworkflowprocessor "github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor" InternalProcessor
+type InternalProcessor interface {
+	Process(layer Intermediate, container stage.Container, step testworkflowsv1.Step) (stage.Stage, error)
+}
+
+type Operation = func(processor InternalProcessor, layer Intermediate, container stage.Container, step testworkflowsv1.Step) (stage.Stage, error)
+
+type processor struct {
+	inspector  imageinspector.Inspector
+	operations []Operation
+}
+
+func New(inspector imageinspector.Inspector) Processor {
+	return &processor{
+		inspector: inspector,
+	}
+}
+
+func (p *processor) Register(operation Operation) Processor {
+	p.operations = append(p.operations, operation)
+	return p
+}
+
+func (p *processor) process(layer Intermediate, container stage.Container, step testworkflowsv1.Step, ref string) (stage.Stage, error) {
+	// Configure defaults
+	if step.WorkingDir != nil {
+		container.SetWorkingDir(*step.WorkingDir)
+	}
+	container.ApplyCR(step.Container)
+
+	// Build an initial group for the inner items
+	self := stage.NewGroupStage(ref, false)
+	self.SetPure(step.Pure)
+	self.SetId(step.Id)
+	self.SetName(step.Name)
+	self.SetOptional(step.Optional).SetNegative(step.Negative).SetTimeout(step.Timeout).SetPaused(step.Paused)
+	if step.Condition == "" {
+		self.SetCondition("passed")
+	} else {
+		// Use a literal "true" for the group so it always starts.
+		// The actual step condition is pushed down to each child operation,
+		// where it will be evaluated after the Container transition that
+		// loads scoped environment variables. This matters when the group
+		// is not flattenable (e.g., step has both shell and artifacts),
+		// because the group's Start is processed before any Container
+		// transition that activates scoped env vars like env.TEST.
+		// For single-child groups, flattening merges this "true" into
+		// the child's condition via AppendConditions.
+		self.SetCondition("true")
+	}
+
+	// Run operations
+	for _, op := range p.operations {
+		stage, err := op(p, layer, container, step)
+		if err != nil {
+			return nil, err
+		}
+		if stage != nil {
+			if step.Condition != "" {
+				stage.AppendConditions(step.Condition)
+			}
+			self.Add(stage)
+		}
+	}
+
+	// Add virtual pause step in case no other is there
+	if self.HasPause() && len(self.Children()) == 0 {
+		pause := stage.NewContainerStage(self.Ref()+"pause", container.CreateChild().
+			SetCommand(constants.DefaultShellPath).
+			SetArgs("-c", "exit 0")).
+			SetPure(true)
+		pause.SetCategory("Wait for continue")
+		self.Add(pause)
+	}
+
+	return self, nil
+}
+
+func (p *processor) Process(layer Intermediate, container stage.Container, step testworkflowsv1.Step) (stage.Stage, error) {
+	return p.process(layer, container, step, layer.NextRef())
+}
+
+func (p *processor) Bundle(ctx context.Context, workflow *testworkflowsv1.TestWorkflow, options BundleOptions,
+	machines ...expressions.Machine) (bundle *Bundle, err error) {
+	if options.Config.Worker.EmptyDirSizeLimit != "" {
+		_, err = resource.ParseQuantity(options.Config.Worker.EmptyDirSizeLimit)
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid worker emptyDir sizeLimit %q", options.Config.Worker.EmptyDirSizeLimit)
+		}
+	}
+
+	// Validate default image pull policy
+	if policy := options.Config.Worker.DefaultImagePullPolicy; policy != "" {
+		switch corev1.PullPolicy(policy) {
+		case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		default:
+			return nil, fmt.Errorf("invalid worker default image pull policy %q (allowed: Always, IfNotPresent, Never)", policy)
+		}
+	}
+	// Validate default runner resources
+	defaultRes := options.Config.Worker.DefaultRunnerResources
+	for _, v := range []struct {
+		name, val string
+	}{
+		{"CPU request", defaultRes.Requests.CPU},
+		{"memory request", defaultRes.Requests.Memory},
+		{"CPU limit", defaultRes.Limits.CPU},
+		{"memory limit", defaultRes.Limits.Memory},
+	} {
+		if v.val != "" {
+			if _, err := resource.ParseQuantity(v.val); err != nil {
+				return nil, fmt.Errorf("invalid worker default runner %s %q: %w", v.name, v.val, err)
+			}
+		}
+	}
+
+	// Initialize intermediate layer
+	layer := NewIntermediate(options.Config.Worker.EmptyDirSizeLimit).
+		AppendPodConfig(workflow.Spec.Pod).
+		AppendJobConfig(workflow.Spec.Job).
+		AppendPvcs(workflow.Spec.Pvcs)
+	layer.ContainerDefaults().
+		ApplyCR(constants.DefaultContainerConfig.DeepCopy()).
+		AppendVolumeMounts(layer.AddEmptyDirVolume(nil, constants.DefaultInternalPath)).
+		AppendVolumeMounts(layer.AddEmptyDirVolume(nil, constants.DefaultTmpDirPath)).
+		AppendVolumeMounts(layer.AddEmptyDirVolume(nil, constants.DefaultDataPath)).
+		AppendVolumeMounts(layer.AddEmptyDirVolume(nil, constants.DefaultTestkubePath))
+
+	orgSlug := options.Config.Execution.OrganizationSlug
+	if orgSlug == "" {
+		orgSlug = options.Config.Execution.OrganizationId
+	}
+	envSlug := options.Config.Execution.EnvironmentSlug
+	if envSlug == "" {
+		envSlug = options.Config.Execution.EnvironmentId
+	}
+
+	mapEnv := make(map[string]corev1.EnvVarSource)
+	machines = append(machines,
+		createSecretMachine(mapEnv),
+		testworkflowconfig.CreateWorkerMachine(&options.Config.Worker),
+		testworkflowconfig.CreateResourceMachine(&options.Config.Resource),
+		testworkflowconfig.CreateCloudMachine(&options.Config.ControlPlane, orgSlug, envSlug),
+		testworkflowconfig.CreatePvcMachine(common.MapMap(layer.Pvcs(), func(v corev1.PersistentVolumeClaim) string { return v.Name })),
+	)
+
+	// Fetch resource root and resource ID
+	if options.Config.Resource.Id == "" {
+		return nil, errors.New("could not resolve resource.id")
+	}
+	if options.Config.Resource.RootId == "" {
+		return nil, errors.New("could not resolve resource.root")
+	}
+
+	err = expressions.Simplify(&workflow, machines...)
+	if err != nil {
+		return nil, errors.Wrap(err, "error while simplifying workflow instructions")
+	}
+
+	// Resolve and validate step IDs after expression simplification,
+	// so auto-derivation works on resolved names rather than raw templates.
+	if err := ResolveAndValidateStepIds(&workflow.Spec); err != nil {
+		return nil, errors.Wrap(err, "step id validation")
+	}
+
+	// Process steps - must be after ResolveAndValidateStepIds so rootStep
+	// picks up the resolved IDs from the spec.
+	rootStep := testworkflowsv1.Step{
+		StepSource: testworkflowsv1.StepSource{
+			Content: workflow.Spec.Content,
+		},
+		Services: workflow.Spec.Services,
+		StepDefaults: testworkflowsv1.StepDefaults{
+			Container: workflow.Spec.Container,
+		},
+		Steps: append(workflow.Spec.Setup, append(workflow.Spec.Steps, workflow.Spec.After...)...),
+	}
+
+	root, err := p.process(layer, layer.ContainerDefaults(), rootStep, constants.RootOperationName)
+	if err != nil {
+		return nil, errors.Wrap(err, "processing error")
+	}
+
+	// Validate if there is anything to run
+	if root.Len() == 0 {
+		return nil, errors.New("test workflow has nothing to run")
+	}
+
+	// Give every stage an id, so each step of the execution has a stable key.
+	AssignStageIds(root)
+
+	// Finalize ConfigMaps
+	configMaps := layer.ConfigMaps()
+	for i := range configMaps {
+		AnnotateControlledBy(&configMaps[i], options.Config.Resource.RootId, options.Config.Resource.Id)
+		err = expressions.FinalizeForce(&configMaps[i], machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing ConfigMap")
+		}
+	}
+
+	// Finalize Pvcs
+	pvcs := make([]corev1.PersistentVolumeClaim, 0)
+	mapPvc := make(map[string]string)
+	for name, spec := range layer.Pvcs() {
+		AnnotateControlledBy(&spec, options.Config.Resource.RootId, options.Config.Resource.Id)
+		err = expressions.FinalizeForce(&spec, machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing Pvc")
+		}
+
+		data := struct{ value string }{value: name}
+		err = expressions.FinalizeForce(&data, machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing name")
+		}
+
+		mapPvc[data.value] = spec.Name
+		pvcs = append(pvcs, spec)
+	}
+	options.Config.Execution.PvcNames = common.MergeMaps(options.Config.Execution.PvcNames, mapPvc)
+
+	// Finalize Secrets
+	secrets := append(layer.Secrets(), options.Secrets...)
+	for i := range secrets {
+		AnnotateControlledBy(&secrets[i], options.Config.Resource.RootId, options.Config.Resource.Id)
+		err = expressions.SimplifyForce(&secrets[i], machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing Secret")
+		}
+	}
+
+	// Finalize Volumes
+	volumes := layer.Volumes()
+	var secretVolumeNames []string
+	for i := range volumes {
+		err = expressions.FinalizeForce(&volumes[i], machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing Volume")
+		}
+		if volumes[i].Secret != nil {
+			secretVolumeNames = append(secretVolumeNames, volumes[i].Name)
+		}
+	}
+
+	volumeNameMap := make(map[string]struct{})
+	for _, volumeName := range secretVolumeNames {
+		volumeNameMap[volumeName] = struct{}{}
+	}
+
+	// Append main label for the pod
+	layer.AppendPodConfig(&testworkflowsv1.PodConfig{
+		Labels: map[string]string{
+			constants.RootResourceIdLabelName: options.Config.Resource.RootId,
+			constants.ResourceIdLabelName:     options.Config.Resource.Id,
+		},
+	})
+
+	// Resolve job & pod config
+	jobConfig, podConfig := layer.JobConfig(), layer.PodConfig()
+	err = expressions.FinalizeForce(&jobConfig, machines...)
+	if err != nil {
+		return nil, errors.Wrap(err, "finalizing job config")
+	}
+	err = expressions.FinalizeForce(&podConfig, machines...)
+	if err != nil {
+		return nil, errors.Wrap(err, "finalizing pod config")
+	}
+	disableFsGroupDefaulting := podConfig.DisableFsGroupDefaulting != nil && *podConfig.DisableFsGroupDefaulting
+	var podResources *corev1.ResourceRequirements
+	if podConfig.Resources != nil {
+		resources, err := stage.MapResourcesToKubernetesResources(podConfig.Resources)
+		if err != nil {
+			return nil, errors.Wrap(err, "pod.resources")
+		}
+		if len(resources.Requests) > 0 || len(resources.Limits) > 0 {
+			podResources = &resources
+		}
+	}
+
+	// Build signature
+	sig := root.Signature().Children()
+	fullSig := root.FullSignature().Children()
+
+	// Load the image pull secrets
+	pullSecretNames := make([]string, len(podConfig.ImagePullSecrets))
+	for i, v := range podConfig.ImagePullSecrets {
+		pullSecretNames[i] = v.Name
+	}
+
+	// Load the image details when necessary.
+	// Determine inspector pull policy per image so cache bypass follows the effective
+	// runtime pull policy. Only the internally injected runner images may bypass the
+	// cache (Always -> live fetch); user containers are always inspected from cache
+	// (IfNotPresent) so their runtime pull policy never forces a registry call here.
+	hasPodSecurityContextGroup := podConfig.SecurityContext != nil && podConfig.SecurityContext.RunAsGroup != nil
+	imageNames := root.GetImages(!hasPodSecurityContextGroup)
+	images := make(map[string]*imageinspector.Info)
+	imageNameResolutions := map[string]string{}
+	imagePullPolicies := map[string]corev1.PullPolicy{}
+	defaultImagePullPolicy := corev1.PullPolicy(options.Config.Worker.DefaultImagePullPolicy)
+	for _, c := range root.ContainerStages() {
+		image := c.Container().Image()
+		policy := c.Container().ImagePullPolicy()
+		isRunnerImage := image == constants.DefaultInitImage || image == constants.DefaultToolkitImage
+		if isRunnerImage && defaultImagePullPolicy != "" && (policy == "" || policy == corev1.PullIfNotPresent) {
+			policy = defaultImagePullPolicy
+		}
+		if isRunnerImage && policy == corev1.PullAlways {
+			imagePullPolicies[image] = corev1.PullAlways
+			continue
+		}
+		if _, ok := imagePullPolicies[image]; !ok {
+			imagePullPolicies[image] = corev1.PullIfNotPresent
+		}
+	}
+	for image, needsMetadata := range imageNames {
+		var info *imageinspector.Info
+		pullPolicy := imagePullPolicies[image]
+		if pullPolicy == "" {
+			pullPolicy = corev1.PullIfNotPresent
+		}
+		if needsMetadata {
+			info, err = p.inspector.Inspect(ctx, "", image, pullPolicy, pullSecretNames)
+			images[image] = info
+		}
+		imageNameResolutions[image] = p.inspector.ResolveName("", image)
+		if err != nil {
+			return nil, executionworkertypes.WithStartReason(err, testkube.StartReasonImagePullFailed)
+		}
+	}
+	err = root.ApplyImages(images, imageNameResolutions)
+	if err != nil {
+		return nil, errors.Wrap(err, "applying image data")
+	}
+
+	// Adjust the security context in case it's a single container besides the Testkube' containers
+	// TODO: Consider flag argument, that would be used only for services?
+	containerStages := root.ContainerStages()
+	var otherContainers []stage.ContainerStage
+	for _, c := range containerStages {
+		if c.Container().Image() != constants.DefaultInitImage && c.Container().Image() != constants.DefaultToolkitImage {
+			otherContainers = append(otherContainers, c)
+		}
+	}
+	if len(otherContainers) == 1 {
+		image := otherContainers[0].Container().Image()
+		sc := otherContainers[0].Container().SecurityContext()
+		if sc == nil {
+			sc = &testworkflowsv1.WorkflowSecurityContext{}
+		}
+		if podConfig.SecurityContext == nil {
+			podConfig.SecurityContext = &testworkflowsv1.WorkflowPodSecurityContext{}
+		}
+		if sc.RunAsGroup == nil && podConfig.SecurityContext.RunAsGroup == nil && images[image] != nil {
+			sc.RunAsGroup = testworkflowsv1.Int64ToWorkflowIntOrString(common.Ptr(images[image].Group))
+			otherContainers[0].Container().SetSecurityContext(sc)
+		}
+		if !disableFsGroupDefaulting && podConfig.SecurityContext.FSGroup == nil {
+			podConfig.SecurityContext.FSGroup = common.MapPtr(sc.RunAsGroup, func(v testworkflowsv1.WorkflowInt64OrString) testworkflowsv1.WorkflowInt64OrString { return v })
+		}
+	}
+
+	// Determine FS Group for the containers
+	var fsGroup *int64
+	if !disableFsGroupDefaulting {
+		fsGroup = common.Ptr(constants.DefaultFsGroup)
+	}
+	if podConfig.SecurityContext != nil && podConfig.SecurityContext.FSGroup != nil {
+		fsGroup, err = testworkflowsv1.ResolveWorkflowInt64("pod.securityContext.fsGroup", podConfig.SecurityContext.FSGroup)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Build list of the containers
+	var pureByDefault *bool
+	if workflow.Spec.System != nil && workflow.Spec.System.PureByDefault != nil && *workflow.Spec.System.PureByDefault {
+		pureByDefault = common.Ptr(true)
+	}
+	actions, err := action.Process(root, pureByDefault, machines...)
+	if err != nil {
+		return nil, errors.Wrap(err, "analyzing Kubernetes container operations")
+	}
+	usesToolkit := false
+	for _, a := range actions {
+		if a.Type() == lite.ActionTypeExecute && a.Execute.Toolkit {
+			usesToolkit = true
+			break
+		}
+	}
+	isolatedContainers := workflow.Spec.System != nil && workflow.Spec.System.IsolatedContainers != nil && *workflow.Spec.System.IsolatedContainers
+	actionGroups := action.Finalize(action.Group(actions, isolatedContainers), isolatedContainers)
+	containers := make([]corev1.Container, len(actionGroups))
+	for i := range actionGroups {
+		var bareActions []actiontypes.Action
+		var globalEnv []testworkflowsv1.EnvVar
+		containers[i], globalEnv, bareActions, err = action.CreateContainer(i, layer.ContainerDefaults(), actionGroups[i], usesToolkit)
+		actionGroups[i] = bareActions
+		if err != nil {
+			return nil, errors.Wrap(err, "building Kubernetes containers")
+		}
+
+		options.Config.Execution.GlobalEnv = testworkflowresolver.DedupeEnvVars(append(options.Config.Execution.GlobalEnv, globalEnv...))
+	}
+
+	secretMountPaths := make(map[string][]string)
+	for i := range containers {
+		err = expressions.FinalizeForce(&containers[i].EnvFrom, machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing container's envFrom")
+		}
+		err = expressions.FinalizeForce(&containers[i].VolumeMounts, machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing container's volumeMounts")
+		}
+		err = expressions.FinalizeForce(&containers[i].Resources, machines...)
+		if err != nil {
+			return nil, errors.Wrap(err, "finalizing container's resources")
+		}
+
+		// Resolve relative paths in the volumeMounts relatively to the working dir.
+		//
+		// Resolved with `path`, not `filepath`: a mount path and a working directory are
+		// paths inside a Linux container, not paths on whatever host the processor runs
+		// on. They agree on Linux, so this only matters elsewhere - but there
+		// filepath.IsAbs("/root/.m2") is false, so an absolute mount path would be
+		// joined onto the working directory, and Join would then put backslashes into a
+		// MountPath that Kubernetes and the container both read as POSIX.
+		workingDir := constants.DefaultDataPath
+		if containers[i].WorkingDir != "" {
+			workingDir = containers[i].WorkingDir
+		}
+		for j := range containers[i].VolumeMounts {
+			if !strings.HasPrefix(containers[i].VolumeMounts[j].MountPath, "/") {
+				containers[i].VolumeMounts[j].MountPath = path.Clean(path.Join(workingDir, containers[i].VolumeMounts[j].MountPath))
+			}
+			if _, ok := volumeNameMap[containers[i].VolumeMounts[j].Name]; ok {
+				secretMountPaths[containers[i].Name] = append(secretMountPaths[containers[i].Name], containers[i].VolumeMounts[j].MountPath)
+			}
+		}
+
+		// Avoid having working directory set up, so we have the default one
+		containers[i].WorkingDir = ""
+
+		// Ensure the cr will have proper access to FS
+		if fsGroup != nil {
+			if containers[i].SecurityContext == nil {
+				containers[i].SecurityContext = &corev1.SecurityContext{}
+			}
+			if containers[i].SecurityContext.RunAsGroup == nil {
+				containers[i].SecurityContext.RunAsGroup = fsGroup
+			}
+		}
+	}
+
+	options.Config.Execution.SecretMountPaths = secretMountPaths
+
+	// Apply default image pull policy for internally injected runner containers.
+	// NOTE: a default of "Never" is honored as-is (e.g. for air-gapped clusters); it
+	// requires the runner init/toolkit images to be pre-pulled on every node that runs
+	// workflows, otherwise the pod fails with ErrImageNeverPull. See the
+	// defaultImagePullPolicy documentation in the Helm values.
+	if options.Config.Worker.DefaultImagePullPolicy != "" {
+		defaultPolicy := corev1.PullPolicy(options.Config.Worker.DefaultImagePullPolicy)
+		for i := range containers {
+			if containers[i].Image != constants.DefaultInitImage && containers[i].Image != constants.DefaultToolkitImage {
+				continue
+			}
+			if containers[i].ImagePullPolicy == "" || containers[i].ImagePullPolicy == corev1.PullIfNotPresent {
+				containers[i].ImagePullPolicy = defaultPolicy
+			}
+		}
+	}
+
+	// Apply default resource requests/limits for internally injected runner containers that have no resources set
+	if defaultRes.Requests.CPU != "" || defaultRes.Requests.Memory != "" || defaultRes.Limits.CPU != "" || defaultRes.Limits.Memory != "" {
+		var (
+			cpuReq, memReq resource.Quantity
+			cpuLim, memLim resource.Quantity
+		)
+		if defaultRes.Requests.CPU != "" {
+			cpuReq = resource.MustParse(defaultRes.Requests.CPU)
+		}
+		if defaultRes.Requests.Memory != "" {
+			memReq = resource.MustParse(defaultRes.Requests.Memory)
+		}
+		if defaultRes.Limits.CPU != "" {
+			cpuLim = resource.MustParse(defaultRes.Limits.CPU)
+		}
+		if defaultRes.Limits.Memory != "" {
+			memLim = resource.MustParse(defaultRes.Limits.Memory)
+		}
+
+		for i := range containers {
+			if containers[i].Image != constants.DefaultInitImage && containers[i].Image != constants.DefaultToolkitImage {
+				continue
+			}
+			// Apply request and limit defaults independently so a container that already
+			// has only one of them set (e.g. only requests via a template) still receives
+			// the configured defaults for the other.
+			if len(containers[i].Resources.Requests) == 0 && (defaultRes.Requests.CPU != "" || defaultRes.Requests.Memory != "") {
+				containers[i].Resources.Requests = corev1.ResourceList{}
+				if defaultRes.Requests.CPU != "" {
+					containers[i].Resources.Requests[corev1.ResourceCPU] = cpuReq
+				}
+				if defaultRes.Requests.Memory != "" {
+					containers[i].Resources.Requests[corev1.ResourceMemory] = memReq
+				}
+			}
+			if len(containers[i].Resources.Limits) == 0 && (defaultRes.Limits.CPU != "" || defaultRes.Limits.Memory != "") {
+				containers[i].Resources.Limits = corev1.ResourceList{}
+				if defaultRes.Limits.CPU != "" {
+					containers[i].Resources.Limits[corev1.ResourceCPU] = cpuLim
+				}
+				if defaultRes.Limits.Memory != "" {
+					containers[i].Resources.Limits[corev1.ResourceMemory] = memLim
+				}
+			}
+		}
+	}
+
+	// Append common environment variables
+	if len(options.CommonEnvVariables) > 0 {
+		for i := range containers {
+			containers[i].Env = append(options.CommonEnvVariables, containers[i].Env...)
+		}
+	}
+
+	// Build pod template
+	if podConfig.SecurityContext == nil {
+		podConfig.SecurityContext = &testworkflowsv1.WorkflowPodSecurityContext{}
+	}
+	if !disableFsGroupDefaulting && podConfig.SecurityContext.FSGroup == nil {
+		podConfig.SecurityContext.FSGroup = testworkflowsv1.Int64ToWorkflowIntOrString(common.Ptr(constants.DefaultFsGroup))
+	}
+	podSecurityContext, err := podConfig.SecurityContext.ToKube()
+	if err != nil {
+		return nil, err
+	}
+	// sharing the host's namespaces is only allowed when low security fields are enabled
+	hostNamespace := func(value *bool) (bool, error) {
+		if value == nil {
+			return false, nil
+		}
+		if !options.AllowLowSecurityFields {
+			return false, errors.New("low security fields are not allowed")
+		}
+		return *value, nil
+	}
+	hostPID, err := hostNamespace(podConfig.HostPID)
+	if err != nil {
+		return nil, err
+	}
+	hostNetwork, err := hostNamespace(podConfig.HostNetwork)
+	if err != nil {
+		return nil, err
+	}
+	hostIPC, err := hostNamespace(podConfig.HostIPC)
+	if err != nil {
+		return nil, err
+	}
+	// On the host network every runner binds the same control port on the node,
+	// so declare it on the pod to let the scheduler keep such pods off nodes
+	// where the port is already taken.
+	if hostNetwork {
+		reserveControlPort(&containers[len(containers)-1])
+	}
+
+	podSpec := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: podConfig.Annotations,
+			Labels:      podConfig.Labels,
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy:             corev1.RestartPolicyNever,
+			EnableServiceLinks:        common.Ptr(false),
+			Volumes:                   volumes,
+			ImagePullSecrets:          podConfig.ImagePullSecrets,
+			ServiceAccountName:        podConfig.ServiceAccountName,
+			NodeSelector:              podConfig.NodeSelector,
+			ActiveDeadlineSeconds:     podConfig.ActiveDeadlineSeconds,
+			DNSPolicy:                 podConfig.DNSPolicy,
+			NodeName:                  podConfig.NodeName,
+			SecurityContext:           podSecurityContext,
+			Hostname:                  podConfig.Hostname,
+			Subdomain:                 podConfig.Subdomain,
+			Affinity:                  podConfig.Affinity,
+			Tolerations:               podConfig.Tolerations,
+			HostAliases:               podConfig.HostAliases,
+			PriorityClassName:         podConfig.PriorityClassName,
+			RuntimeClassName:          podConfig.RuntimeClassName,
+			SchedulerName:             podConfig.SchedulerName,
+			HostUsers:                 podConfig.HostUsers,
+			Priority:                  podConfig.Priority,
+			DNSConfig:                 podConfig.DNSConfig,
+			PreemptionPolicy:          podConfig.PreemptionPolicy,
+			TopologySpreadConstraints: podConfig.TopologySpreadConstraints,
+			SchedulingGates:           podConfig.SchedulingGates,
+			ResourceClaims:            podConfig.ResourceClaims,
+			HostPID:                   hostPID,
+			HostNetwork:               hostNetwork,
+			HostIPC:                   hostIPC,
+			SetHostnameAsFQDN:         podConfig.SetHostnameAsFQDN,
+			Resources:                 podResources,
+		},
+	}
+	AnnotateControlledBy(&podSpec, options.Config.Resource.RootId, options.Config.Resource.Id)
+	podSpec.Spec.InitContainers = containers[:len(containers)-1]
+	podSpec.Spec.Containers = containers[len(containers)-1:]
+
+	// Build job spec
+	// TODO: Add ownerReferences in case of parent pod?
+	jobSpec := batchv1.Job{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Job",
+			APIVersion: batchv1.SchemeGroupVersion.String(),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        options.Config.Resource.Id,
+			Annotations: jobConfig.Annotations,
+			Labels:      jobConfig.Labels,
+			Namespace:   jobConfig.Namespace,
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:          common.Ptr(int32(0)),
+			ActiveDeadlineSeconds: jobConfig.ActiveDeadlineSeconds,
+		},
+	}
+	AnnotateControlledBy(&jobSpec, options.Config.Resource.RootId, options.Config.Resource.Id)
+	err = expressions.FinalizeForce(&jobSpec, machines...)
+	if err != nil {
+		return nil, errors.Wrap(err, "finalizing job spec")
+	}
+	jobSpec.Spec.Template = podSpec
+
+	// Stamp the human-readable workflow name as a label on the job and its pod template so
+	// runner pods can be selected by workflow in observability tooling (Prometheus/Grafana).
+	if workflowNameLabel := utils.SanitizeLabelValue(options.Config.Workflow.Name); workflowNameLabel != "" {
+		AnnotateWorkflowName(&jobSpec, workflowNameLabel)
+	}
+
+	// TODO(TKC-2585): Avoid adding the secrets to all the groups without isolation
+	addEnvVarToContainerSpec(mapEnv, jobSpec.Spec.Template.Spec.InitContainers)
+	addEnvVarToContainerSpec(mapEnv, jobSpec.Spec.Template.Spec.Containers)
+
+	// Build running instructions
+	sigSerialized, _ := json.Marshal(sig)
+	actionGroupsSerialized, _ := json.Marshal(actionGroups)
+	internalConfigSerialized, _ := json.Marshal(options.Config)
+	podAnnotations := make(map[string]string)
+	maps.Copy(podAnnotations, jobSpec.Spec.Template.Annotations)
+	maps.Copy(podAnnotations, map[string]string{
+		constants.SignatureAnnotationName:   string(sigSerialized),
+		constants.SpecAnnotationName:        string(actionGroupsSerialized),
+		constants.InternalAnnotationName:    string(internalConfigSerialized),
+		constants.ScheduledAtAnnotationName: options.ScheduledAt.UTC().Format(time.RFC3339Nano),
+	})
+	if workflow.Spec.Timeouts != nil && workflow.Spec.Timeouts.Initialization != "" {
+		initializationTimeout, err := time.ParseDuration(workflow.Spec.Timeouts.Initialization)
+		if err != nil || initializationTimeout <= 0 {
+			return nil, fmt.Errorf("timeouts.initialization: %q is not a positive duration", workflow.Spec.Timeouts.Initialization)
+		}
+		podAnnotations[constants.InitializationTimeoutAnnotation] = initializationTimeout.String()
+	}
+	jobSpec.Spec.Template.Annotations = podAnnotations
+
+	// Build bundle
+	bundle = &Bundle{
+		ConfigMaps:    configMaps,
+		Secrets:       secrets,
+		Pvcs:          pvcs,
+		Job:           jobSpec,
+		Signature:     sig,
+		FullSignature: fullSig,
+	}
+	return bundle, nil
+}
+
+func addEnvVarToContainerSpec(mapEnv map[string]corev1.EnvVarSource, containers []corev1.Container) {
+	for i := range containers {
+		for envName, envSource := range mapEnv {
+			e := corev1.EnvVar{
+				Name:      envName,
+				ValueFrom: envSource.DeepCopy(),
+			}
+
+			if e.ValueFrom != nil {
+				if e.ValueFrom.ConfigMapKeyRef != nil && e.ValueFrom.ConfigMapKeyRef.Optional == nil {
+					e.ValueFrom.ConfigMapKeyRef.Optional = common.Ptr(true)
+				}
+
+				if e.ValueFrom.SecretKeyRef != nil && e.ValueFrom.SecretKeyRef.Optional == nil {
+					e.ValueFrom.SecretKeyRef.Optional = common.Ptr(true)
+				}
+			}
+
+			containers[i].Env = append(containers[i].Env, e)
+		}
+	}
+}
+
+// reserveControlPort declares the runner control server port on the container,
+// unless it's already declared there.
+func reserveControlPort(container *corev1.Container) {
+	port := int32(initconstants.ControlServerPort)
+	for _, p := range container.Ports {
+		if p.ContainerPort == port && (p.Protocol == "" || p.Protocol == corev1.ProtocolTCP) {
+			return
+		}
+	}
+	container.Ports = append(container.Ports, corev1.ContainerPort{
+		Name:          "tk-control",
+		ContainerPort: port,
+		Protocol:      corev1.ProtocolTCP,
+	})
+}

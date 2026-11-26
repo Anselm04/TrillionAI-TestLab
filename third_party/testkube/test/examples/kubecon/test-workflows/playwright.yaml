@@ -1,0 +1,37 @@
+apiVersion: testworkflows.testkube.io/v1
+kind: TestWorkflow
+metadata:
+  name: playwright
+  labels:
+    category: e2e-ui-testing
+    artifacts: "true"
+spec:
+  content:
+    git:
+      uri: https://github.com/kubeshop/testkube
+      revision: main
+      paths:
+      - test/playwright/playwright-project
+  container:
+    resources:
+      requests:
+        cpu: 1500m
+        memory: 2Gi
+    workingDir: /data/repo/test/playwright/playwright-project
+  steps:
+  - name: Install dependencies
+    run:
+      image: mcr.microsoft.com/playwright:v1.56.1
+      command:
+      - npm
+      args:
+      - ci
+  - name: Run tests
+    run:
+      image: mcr.microsoft.com/playwright:v1.56.1
+      shell: npx playwright test
+  - name: Save artifacts
+    workingDir: /data/repo/test/playwright/playwright-project
+    artifacts:
+      paths:
+      - playwright-report/**/*

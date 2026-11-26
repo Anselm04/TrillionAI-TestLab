@@ -1,0 +1,599 @@
+package expressions
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/kubeshop/testkube/internal/common"
+)
+
+type testObj2 struct {
+	Expr  string `expr:"expression"`
+	Dummy string
+}
+
+type testObj struct {
+	Expr            string                        `expr:"expression"`
+	Tmpl            string                        `expr:"template"`
+	ExprPtr         *string                       `expr:"expression"`
+	TmplPtr         *string                       `expr:"template"`
+	IntExpr         intstr.IntOrString            `expr:"expression"`
+	IntTmpl         intstr.IntOrString            `expr:"template"`
+	IntExprPtr      *intstr.IntOrString           `expr:"expression"`
+	IntTmplPtr      *intstr.IntOrString           `expr:"template"`
+	Obj             testObj2                      `expr:"include"`
+	ObjPtr          *testObj2                     `expr:"include"`
+	SliceExprStr    []string                      `expr:"expression"`
+	SliceExprStrPtr *[]string                     `expr:"expression"`
+	SliceExprObj    []testObj2                    `expr:"include"`
+	MapKeyVal       map[string]string             `expr:"template,template"`
+	MapValIntTmpl   map[string]intstr.IntOrString `expr:"template"`
+	MapKeyTmpl      map[string]string             `expr:"template,"`
+	MapValTmpl      map[string]string             `expr:"template"`
+	MapTmplExpr     map[string]string             `expr:"template,expression"`
+	Dummy           string
+	DummyPtr        *string
+	DummyObj        testObj2
+	DummyObjPtr     *testObj2
+}
+
+type testObjNested struct {
+	Value corev1.Volume `expr:"force"`
+	Dummy corev1.Volume
+}
+
+type testEnum string
+
+type testObjWithStringEnums struct {
+	Value testEnum `expr:"force"`
+	Dummy testEnum
+}
+
+type testObjWithStringEnumPointers struct {
+	Value *testEnum `expr:"force"`
+	Dummy *testEnum
+}
+
+type testObjWithStringEnumExpressions struct {
+	Value *testEnum `expr:"expression"`
+	Dummy *testEnum
+}
+
+type testObjInterfaced struct {
+	Value map[string][]interface{} `expr:"force"`
+}
+
+type testObjWithSliceTemplate struct {
+	Args *[]string `expr:"template"`
+}
+
+var testMachine = NewMachine().
+	Register("dummy", "test").
+	Register("ten", 10)
+
+func TestGenericString(t *testing.T) {
+	obj := testObj{
+		Expr:     "5 + 3 + ten",
+		Tmpl:     "{{ 10 + 3 }}{{ ten }}",
+		ExprPtr:  common.Ptr("1 + 2 + ten"),
+		TmplPtr:  common.Ptr("{{ 4 + 3 }}{{ ten }}"),
+		Dummy:    "5 + 3 + ten",
+		DummyPtr: common.Ptr("5 + 3 + ten"),
+	}
+	err := Simplify(&obj, testMachine)
+	assert.NoError(t, err)
+	assert.Equal(t, "18", obj.Expr)
+	assert.Equal(t, "1310", obj.Tmpl)
+	assert.Equal(t, common.Ptr("13"), obj.ExprPtr)
+	assert.Equal(t, common.Ptr("710"), obj.TmplPtr)
+	assert.Equal(t, "5 + 3 + ten", obj.Dummy)
+	assert.Equal(t, common.Ptr("5 + 3 + ten"), obj.DummyPtr)
+}
+
+func TestGenericIntOrString(t *testing.T) {
+	obj := testObj{
+		IntExpr:    intstr.IntOrString{Type: intstr.String, StrVal: "5 + 3 + ten"},
+		IntTmpl:    intstr.IntOrString{Type: intstr.String, StrVal: "{{ 10 + 3 }}{{ ten }}"},
+		IntExprPtr: &intstr.IntOrString{Type: intstr.String, StrVal: "1 + 2 + ten"},
+		IntTmplPtr: &intstr.IntOrString{Type: intstr.String, StrVal: "{{ 4 + 3 }}{{ ten }}"},
+	}
+	err := Simplify(&obj, testMachine)
+	assert.NoError(t, err)
+	assert.Equal(t, "18", obj.IntExpr.String())
+	assert.Equal(t, "1310", obj.IntTmpl.String())
+	assert.Equal(t, "13", obj.IntExprPtr.String())
+	assert.Equal(t, "710", obj.IntTmplPtr.String())
+}
+
+func TestGenericSlice(t *testing.T) {
+	obj := testObj{
+		SliceExprStr:    []string{"200 + 100", "100 + 200", "ten", "abc"},
+		SliceExprStrPtr: &[]string{"200 + 100", "100 + 200", "ten", "abc"},
+		SliceExprObj:    []testObj2{{Expr: "10 + 5", Dummy: "3 + 2"}},
+	}
+	err := Simplify(&obj, testMachine)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"300", "300", "10", "abc"}, obj.SliceExprStr)
+	assert.Equal(t, &[]string{"300", "300", "10", "abc"}, obj.SliceExprStrPtr)
+	assert.Equal(t, []testObj2{{Expr: "15", Dummy: "3 + 2"}}, obj.SliceExprObj)
+}
+
+func TestGenericMap(t *testing.T) {
+	obj := testObj{
+		MapKeyVal:     map[string]string{"{{ 10 + 3 }}2": "{{ 3 + 5 }}"},
+		MapKeyTmpl:    map[string]string{"{{ 10 + 3 }}2": "{{ 3 + 5 }}"},
+		MapValTmpl:    map[string]string{"{{ 10 + 3 }}2": "{{ 3 + 5 }}"},
+		MapValIntTmpl: map[string]intstr.IntOrString{"{{ 10 + 3 }}2": {Type: intstr.String, StrVal: "{{ 3 + 5 }}"}},
+		MapTmplExpr:   map[string]string{"{{ 10 + 3 }}2": "3 + 5"},
+	}
+	err := Simplify(&obj, testMachine)
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{"132": "8"}, obj.MapKeyVal)
+	assert.Equal(t, map[string]string{"132": "{{ 3 + 5 }}"}, obj.MapKeyTmpl)
+	assert.Equal(t, map[string]string{"{{ 10 + 3 }}2": "8"}, obj.MapValTmpl)
+	assert.Equal(t, map[string]intstr.IntOrString{"{{ 10 + 3 }}2": {Type: intstr.String, StrVal: "8"}}, obj.MapValIntTmpl)
+	assert.Equal(t, map[string]string{"132": "8"}, obj.MapTmplExpr)
+}
+
+func TestNestedObject(t *testing.T) {
+	obj := testObj{
+		Obj:         testObj2{Expr: "10 + 5", Dummy: "3 + 2"},
+		ObjPtr:      &testObj2{Expr: "10 + 8", Dummy: "33 + 2"},
+		DummyObj:    testObj2{Expr: "10 + 8", Dummy: "333 + 2"},
+		DummyObjPtr: &testObj2{Expr: "10 + 8", Dummy: "3333 + 2"},
+	}
+	err := Simplify(&obj, testMachine)
+	assert.NoError(t, err)
+	assert.Equal(t, testObj2{Expr: "15", Dummy: "3 + 2"}, obj.Obj)
+	assert.Equal(t, &testObj2{Expr: "18", Dummy: "33 + 2"}, obj.ObjPtr)
+	assert.Equal(t, testObj2{Expr: "10 + 8", Dummy: "333 + 2"}, obj.DummyObj)
+	assert.Equal(t, &testObj2{Expr: "10 + 8", Dummy: "3333 + 2"}, obj.DummyObjPtr)
+}
+
+func TestGenericNotMutateStringPointer(t *testing.T) {
+	ptr := common.Ptr("200 + 10")
+	obj := testObj{
+		ExprPtr: ptr,
+	}
+	_ = Simplify(&obj, testMachine)
+	assert.Equal(t, common.Ptr("200 + 10"), ptr)
+}
+
+func TestGenericCompileError(t *testing.T) {
+	got := testObj{
+		Tmpl: "{{ 1 + 2 }}{{ 3",
+	}
+	err := Simplify(&got)
+
+	assert.Contains(t, fmt.Sprintf("%v", err), "Tmpl: template error")
+}
+
+func TestGenericForceSimplify(t *testing.T) {
+	got := corev1.Volume{
+		Name: "{{ 3 + 2 }}{{ 5 }}",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "{{ 4433 }}"},
+			},
+		},
+	}
+	err := SimplifyForce(&got)
+
+	want := corev1.Volume{
+		Name: "55",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "4433"},
+			},
+		},
+	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericForceSimplifyNested(t *testing.T) {
+	got := testObjNested{
+		Value: corev1.Volume{
+			Name: "{{ 3 + 2 }}{{ 5 }}",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "{{ 4433 }}"},
+				},
+			},
+		},
+		Dummy: corev1.Volume{
+			Name: "{{ 3 + 2 }}{{ 5 }}",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "{{ 4433 }}"},
+				},
+			},
+		},
+	}
+	err := Simplify(&got)
+
+	want := testObjNested{
+		Value: corev1.Volume{
+			Name: "55",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "4433"},
+				},
+			},
+		},
+		Dummy: corev1.Volume{
+			Name: "{{ 3 + 2 }}{{ 5 }}",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "{{ 4433 }}"},
+				},
+			},
+		},
+	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyWithStringEnums(t *testing.T) {
+	got := testObjWithStringEnums{
+		Value: "{{ 3 + 2 }}{{ 5 }}",
+		Dummy: "{{ 4433 }}",
+	}
+	err := Simplify(&got)
+
+	want := testObjWithStringEnums{
+		Value: "55",
+		Dummy: "{{ 4433 }}",
+	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyWithStringEnumPointers(t *testing.T) {
+	got := testObjWithStringEnumPointers{
+		Value: common.Ptr[testEnum]("{{ 3 + 2 }}{{ 5 }}"),
+		Dummy: common.Ptr[testEnum]("{{ 4433 }}"),
+	}
+	err := Simplify(&got)
+
+	want := testObjWithStringEnumPointers{
+		Value: common.Ptr[testEnum]("55"),
+		Dummy: common.Ptr[testEnum]("{{ 4433 }}"),
+	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyWithStringEnumExpressions(t *testing.T) {
+	got := testObjWithStringEnumExpressions{
+		Value: common.Ptr[testEnum]("5 + 3 + ten"),
+		Dummy: common.Ptr[testEnum]("5 + 3 + ten"),
+	}
+	err := Simplify(&got, testMachine)
+
+	want := testObjWithStringEnumExpressions{
+		Value: common.Ptr[testEnum]("18"),
+		Dummy: common.Ptr[testEnum]("5 + 3 + ten"),
+	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyArrayInterface(t *testing.T) {
+	got := []interface{}{"{{ 5 + 2 }}{{ 5 }}"}
+	err := SimplifyForce(&got)
+
+	want := []interface{}{"75"}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyMapArrayInterface(t *testing.T) {
+	got := map[string][]interface{}{
+		"key":   {"{{ 4 + 2 }}{{ 5 }}"},
+		"dummy": {"{{ 10 + 2 }}{{ 5 }}"},
+	}
+	err := SimplifyForce(&got)
+
+	want := map[string][]interface{}{
+		"key":   {"65"},
+		"dummy": {"125"},
+	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyNestedWithInterfaces(t *testing.T) {
+	got := testObjInterfaced{
+		Value: map[string][]interface{}{
+			"key":   {"{{ 3 + 2 }}{{ 5 }}"},
+			"dummy": {"{{ 10 + 2 }}{{ 5 }}"},
+		},
+	}
+	err := Simplify(&got)
+
+	want := testObjInterfaced{
+		Value: map[string][]interface{}{
+			"key":   {"55"},
+			"dummy": {"125"},
+		},
+	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyArrayExpansionInStringSlice(t *testing.T) {
+	args := []string{"{{ list('1','2','3') }}"}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"1", "2", "3"}, obj.Args)
+}
+
+func TestGenericSimplifyArrayExpansionWithList(t *testing.T) {
+	args := []string{"{{ list('a','b','c') }}"}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"a", "b", "c"}, obj.Args)
+}
+
+func TestGenericSimplifyArrayExpansionWithSplit(t *testing.T) {
+	args := []string{"{{ split('x,y,z') }}"}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"x", "y", "z"}, obj.Args)
+}
+
+func TestGenericSimplifyArrayExpansionMixed(t *testing.T) {
+	args := []string{"first", "{{ list('a','b') }}", "last"}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"first", "a", "b", "last"}, obj.Args)
+}
+
+func TestGenericSimplifyArrayExpansionNonArray(t *testing.T) {
+	// When expression doesn't resolve to an array, it should be stringified as before
+	args := []string{"{{ 'hello' }}"}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"hello"}, obj.Args)
+}
+
+func TestGenericSimplifyArrayExpansionNonPureTemplate(t *testing.T) {
+	// When template has surrounding text, it should be stringified as before
+	args := []string{"prefix{{ list('1','2') }}suffix"}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"prefix1,2suffix"}, obj.Args)
+}
+
+func TestGenericSimplifyArrayExpansionWithArrayLiteral(t *testing.T) {
+	// Mirrors: content.git.paths: ["{{ list(\"test/k6/k6-smoke-test.js\",\"test/k6/k6-smoke-test-negative.js\") }}"]
+	// Note: single quotes inside array literals (e.g. ['a','b']) are not supported by the tokenizer;
+	// use list() or JSON-style double-quoted arrays instead.
+	args := []string{`{{ list("test/k6/k6-smoke-test.js","test/k6/k6-smoke-test-negative.js") }}`}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"test/k6/k6-smoke-test.js", "test/k6/k6-smoke-test-negative.js"}, obj.Args)
+}
+
+func TestGenericSimplifyArrayExpansionWithJSONArrayLiteral(t *testing.T) {
+	// JSON-style double-quoted array literal
+	args := []string{`{{ ["test/k6/k6-smoke-test.js","test/k6/k6-smoke-test-negative.js"] }}`}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, testMachine)
+
+	assert.NoError(t, err)
+	assert.Equal(t, &[]string{"test/k6/k6-smoke-test.js", "test/k6/k6-smoke-test-negative.js"}, obj.Args)
+}
+
+func TestGenericSimplifyForceArrayExpansionInterface(t *testing.T) {
+	got := []interface{}{"{{ list('x','y','z') }}"}
+	err := SimplifyForce(&got)
+
+	want := []interface{}{"x", "y", "z"}
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestGenericSimplifyWildcardAccessorNotSplit(t *testing.T) {
+	// When a template uses a wildcard accessor like "services.slave.*.ip",
+	// it should be treated as a comma-separated string, NOT expanded as an array.
+	machine := NewMachine().
+		Register("services", map[string]interface{}{
+			"slave": []interface{}{
+				map[string]interface{}{"ip": "10.0.0.1"},
+				map[string]interface{}{"ip": "10.0.0.2"},
+			},
+		})
+
+	args := []string{"{{services.slave.*.ip}}"}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, machine)
+
+	assert.NoError(t, err)
+	// Should remain as a single comma-separated string, not split into separate elements
+	assert.Equal(t, &[]string{"10.0.0.1,10.0.0.2"}, obj.Args)
+}
+
+func TestGenericSimplifyCompiledWildcardAccessorNotSplit(t *testing.T) {
+	// When a wildcard accessor has been compiled to its _wc() form (e.g. after
+	// a round-trip through Simplify when services were not yet available), it
+	// should still be treated as a comma-separated string, NOT expanded as an array.
+	machine := NewMachine().
+		Register("services", map[string]interface{}{
+			"slave": []interface{}{
+				map[string]interface{}{"ip": "10.0.0.1"},
+				map[string]interface{}{"ip": "10.0.0.2"},
+			},
+		})
+
+	// This is the compiled form of "services.slave.*.ip"
+	args := []string{`{{_wc(services.slave,"_.value.ip")}}`}
+	obj := testObjWithSliceTemplate{Args: &args}
+	err := Simplify(&obj, machine)
+
+	assert.NoError(t, err)
+	// Should remain as a single comma-separated string, not split into separate elements
+	assert.Equal(t, &[]string{"10.0.0.1,10.0.0.2"}, obj.Args)
+}
+
+func TestInitContainerCommandResolution_CompiledWildcard(t *testing.T) {
+	// Simulates the init container's run.go command resolution for the JMeter
+	// distributed test workflow. The arg "{{_wc(services.slave,"_.value.ip")}}"
+	// is the compiled form of "{{services.slave.*.ip}}" and should resolve to
+	// a single comma-separated string, not expand into separate args.
+	machine := NewMachine().
+		Register("services", map[string]interface{}{
+			"slave": []interface{}{
+				map[string]interface{}{"ip": "172.16.9.160"},
+				map[string]interface{}{"ip": "172.16.9.161"},
+			},
+		})
+
+	command := []string{
+		"-n", "-X", "-Jserver.rmi.ssl.disable=true",
+		"-Jclient.rmi.localport=7000", "-R",
+		`{{_wc(services.slave,"_.value.ip")}}`,
+		"-t", "jmeter-executor-smoke.jmx",
+	}
+
+	// Simulate run.go logic
+	expandedCommand := make([]string, 0, len(command))
+	for i := range command {
+		if innerExpr, isPure := ExtractPureTemplateExpression(command[i]); isPure && !IsWildcardAccessorOnly(innerExpr) {
+			expr, err := CompileAndResolve(innerExpr, machine, FinalizerFail)
+			assert.NoError(t, err)
+			if expr.Static() != nil {
+				if items, sliceErr := expr.Static().SliceValue(); sliceErr == nil {
+					for _, item := range items {
+						sv := NewValue(item)
+						s, _ := sv.StringValue()
+						expandedCommand = append(expandedCommand, s)
+					}
+					continue
+				}
+				s, _ := expr.Static().StringValue()
+				expandedCommand = append(expandedCommand, s)
+				continue
+			}
+		}
+		value, err := CompileAndResolveTemplate(command[i], machine, FinalizerFail)
+		assert.NoError(t, err)
+		s, _ := value.Static().StringValue()
+		expandedCommand = append(expandedCommand, s)
+	}
+
+	// The -R arg should be followed by a SINGLE comma-separated string, not
+	// separate elements. JMeter expects: -R 172.16.9.160,172.16.9.161
+	expected := []string{
+		"-n", "-X", "-Jserver.rmi.ssl.disable=true",
+		"-Jclient.rmi.localport=7000", "-R",
+		"172.16.9.160,172.16.9.161",
+		"-t", "jmeter-executor-smoke.jmx",
+	}
+	assert.Equal(t, expected, expandedCommand)
+}
+
+type PathTestEnv struct {
+	Value string `json:"value" expr:"template"`
+}
+
+type PathTestContainer struct {
+	Env []PathTestEnv `json:"env" expr:"include"`
+}
+
+type PathTestStep struct {
+	PathTestContainer `json:",inline" expr:"include"`
+	Labels            map[string]string `json:"labels" expr:"template,template"`
+}
+
+// PathTestList has its own JSON form, so YAML shows it as one value, as a matrix value.
+type PathTestList struct {
+	Static     []string `expr:"template"`
+	Expression string   `expr:"template"`
+}
+
+func (l *PathTestList) UnmarshalJSON([]byte) error {
+	return nil
+}
+
+type PathTestSpec struct {
+	Steps  []PathTestStep          `json:"steps" expr:"include"`
+	Plain  string                  `expr:"template"`
+	Matrix map[string]PathTestList `json:"matrix" expr:"include"`
+}
+
+type PathTestRoot struct {
+	Spec PathTestSpec `json:"spec" expr:"include"`
+}
+
+func TestFinalize_ErrorPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		root     PathTestRoot
+		wantPath string
+	}{
+		{
+			name: "a field in a slice under an embedded struct",
+			root: PathTestRoot{Spec: PathTestSpec{Steps: []PathTestStep{{
+				PathTestContainer: PathTestContainer{Env: []PathTestEnv{{Value: "ok"}, {Value: "{{config.missing}}"}}},
+			}}}},
+			wantPath: "spec.steps[0].env[1].value: ",
+		},
+		{
+			name: "a value in a map",
+			root: PathTestRoot{Spec: PathTestSpec{Steps: []PathTestStep{{
+				Labels: map[string]string{"app": "{{config.missing}}"},
+			}}}},
+			wantPath: "spec.steps[0].labels[app]: ",
+		},
+		{
+			name: "a value with its own JSON form hides its Go fields",
+			root: PathTestRoot{Spec: PathTestSpec{Matrix: map[string]PathTestList{
+				"browser": {Static: []string{"ok", "{{config.missing}}"}},
+			}}},
+			wantPath: "spec.matrix[browser][1]: ",
+		},
+		{
+			name:     "a field without a json tag keeps its Go name",
+			root:     PathTestRoot{Spec: PathTestSpec{Plain: "{{config.missing}}"}},
+			wantPath: "spec.Plain: ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Finalize(&tt.root)
+			if assert.Error(t, err) {
+				assert.True(t, strings.HasPrefix(err.Error(), tt.wantPath), "got %q", err.Error())
+			}
+		})
+	}
+}

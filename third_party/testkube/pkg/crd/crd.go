@@ -1,0 +1,130 @@
+package crd
+
+import (
+	"bytes"
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"text/template"
+
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/kube-openapi/pkg/validation/spec"
+	"k8s.io/kube-openapi/pkg/validation/strfmt"
+	"k8s.io/kube-openapi/pkg/validation/validate"
+
+	opcrd "github.com/kubeshop/testkube/k8s"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+)
+
+//go:embed templates
+var tf embed.FS
+
+// Template is crd template type
+type Template string
+
+const (
+	// TemplateWebhook is webhook crd template
+	TemplateWebhook Template = "webhook"
+	// TemplateWebhookTemplate is webhook template crd template
+	TemplateWebhookTemplate Template = "webhooktemplate"
+	// TemplateTestTrigger is test trigger crd template
+	TemplateTestTrigger Template = "testtrigger"
+)
+
+// Gettable is an interface of gettable objects
+// It is limited to the models which still have a CRD template available.
+type Gettable interface {
+	testkube.Webhook |
+		testkube.WebhookCreateRequest |
+		testkube.WebhookTemplate |
+		testkube.WebhookTemplateCreateRequest |
+		testkube.TestTrigger |
+		testkube.TestTriggerUpsertRequest
+}
+
+// ExecuteTemplate executes crd template
+func ExecuteTemplate(tmpl Template, data any) (string, error) {
+	t, err := template.ParseFS(tf, fmt.Sprintf("templates/%s.tmpl", tmpl))
+	if err != nil {
+		return "", err
+	}
+
+	buffer := bytes.NewBuffer([]byte{})
+	err = t.Execute(buffer, data)
+	return buffer.String(), err
+}
+
+// GenerateYAML generates CRDs yaml for Testkube models
+func GenerateYAML[G Gettable](tmpl Template, items []G) (string, error) {
+	data := ""
+	firstEntry := true
+	for _, item := range items {
+		result, err := ExecuteTemplate(tmpl, item)
+		if err != nil {
+			return "", fmt.Errorf("could not populate YAML template for %s: %w", tmpl, err)
+		}
+
+		if !firstEntry {
+			data += "\n---\n"
+		} else {
+			firstEntry = false
+		}
+
+		data += result
+	}
+
+	return data, nil
+}
+
+func ValidateYAMLAgainstSchema(name opcrd.Schema, dataYAML []byte) error {
+	// Load CRD YAML
+	schemaYAML, err := opcrd.SF.ReadFile(fmt.Sprintf("crd/%s.yaml", name))
+	if err != nil {
+		return err
+	}
+
+	// Strict validation by disabling additional properties at spec
+	schemaYAML = bytes.ReplaceAll(schemaYAML, []byte(strings.Repeat(" ", 12)+"spec:"),
+		[]byte(strings.Repeat(" ", 12)+"spec:\n"+strings.Repeat(" ", 14)+"additionalProperties: false"))
+
+	crd := apiextv1.CustomResourceDefinition{}
+	err = yaml.Unmarshal(schemaYAML, &crd)
+	if err != nil {
+		return err
+	}
+
+	// Get YAML schema from CRD for v1 version
+	if len(crd.Spec.Versions) == 0 || crd.Spec.Versions[0].Schema == nil {
+		return errors.New("schema not found")
+	}
+
+	schemaJSON, err := json.Marshal(crd.Spec.Versions[0].Schema.OpenAPIV3Schema)
+	if err != nil {
+		return err
+	}
+
+	schema := new(spec.Schema)
+	if err = json.Unmarshal([]byte(schemaJSON), schema); err != nil {
+		return err
+	}
+
+	dataJSON, err := yaml.ToJSON(dataYAML)
+	if err != nil {
+		return err
+	}
+
+	data := map[string]interface{}{}
+	if err = json.Unmarshal(dataJSON, &data); err != nil {
+		return err
+	}
+
+	// strfmt.Default is the registry of recognized formats
+	if err = validate.AgainstSchema(schema, data, strfmt.Default); err != nil {
+		return err
+	}
+
+	return nil
+}

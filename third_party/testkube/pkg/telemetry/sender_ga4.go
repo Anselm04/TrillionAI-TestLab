@@ -1,0 +1,87 @@
+package telemetry
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+
+	"github.com/kubeshop/testkube/pkg/log"
+)
+
+const (
+	gaUrl           = "https://www.google-analytics.com/mp/collect?measurement_id=%s&api_secret=%s"
+	gaValidationUrl = "https://www.google-analytics.com/debug/mp/collect?measurement_id=%s&api_secret=%s"
+)
+
+var (
+	TestkubeMeasurementID     = "" //this is default but it can be set using ldflag -X github.com/kubeshop/testkube/pkg/telemetry.TestkubeMeasurementID=G-B6KY2SF30K
+	TestkubeMeasurementSecret = ""
+)
+
+// GoogleAnalyticsSender returns the body it sends on every path past marshalling, failures
+// included: a request can fail after its body is written, and the user inspecting telemetry
+// should still see what may have left the machine.
+func GoogleAnalyticsSender(client *http.Client, payload Payload) (out string, err error) {
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	// The validation request posts the same body.
+	_, err = sendValidationRequest(payload)
+	if err != nil {
+		return string(jsonData), err
+	}
+
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, fmt.Sprintf(gaUrl, TestkubeMeasurementID, TestkubeMeasurementSecret), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return string(jsonData), err
+	}
+
+	request.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(request)
+	if err != nil {
+		return string(jsonData), err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+
+	if resp.StatusCode > 300 {
+		return string(jsonData), fmt.Errorf("could not POST, statusCode: %d", resp.StatusCode)
+	}
+	return fmt.Sprintf("%s (status: %d - %s)", jsonData, resp.StatusCode, b), err
+}
+
+func sendValidationRequest(payload Payload) (out string, err error) {
+	log.DefaultLogger.Debugw("sending ga payload to validate", "payload", payload)
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return out, err
+	}
+
+	uri := fmt.Sprintf(gaValidationUrl, TestkubeMeasurementID, TestkubeMeasurementSecret)
+
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, uri, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return out, err
+	}
+
+	request.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(request)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+
+	if resp.StatusCode > 300 {
+		return out, fmt.Errorf("could not POST, statusCode: %d", resp.StatusCode)
+	}
+	return fmt.Sprintf("status: %d - %s", resp.StatusCode, b), err
+}

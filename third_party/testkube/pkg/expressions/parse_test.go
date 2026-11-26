@@ -1,0 +1,603 @@
+package expressions
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestCompileBasic(t *testing.T) {
+	assert.Equal(t, "value", must(MustCompile(`"value"`).Static().StringValue()))
+}
+
+func TestCompileTernary(t *testing.T) {
+	assert.Equal(t, "value", must(MustCompile(`true ? "value" : "another"`).Static().StringValue()))
+	assert.Equal(t, "another", must(MustCompile(`false ? "value" : "another"`).Static().StringValue()))
+	assert.Equal(t, "another", must(MustCompile(`5 == 3 ? "value" : "another"`).Static().StringValue()))
+	assert.Equal(t, "another", must(MustCompile(`5 == 3 && 2 == 4 ? "value" : "another"`).Static().StringValue()))
+	assert.Equal(t, "another", must(MustCompile(`5 == 3 || 2 == 4 ? "value" : "another"`).Static().StringValue()))
+	assert.Equal(t, "value", must(MustCompile(`3 == 3 || 2 == 4 ? "value" : "another"`).Static().StringValue()))
+	assert.Equal(t, "xyz", must(MustCompile(`false ? "value" : true ? "xyz" :"another"`).Static().StringValue()))
+	assert.Equal(t, "xyz", must(MustCompile(`false ? "value" : (true ? "xyz" :"another")`).Static().StringValue()))
+	assert.Equal(t, 5.78, must(MustCompile(`false ? 3 : (true ? 5.78 : 2)`).Static().FloatValue()))
+}
+
+func TestCompileMath(t *testing.T) {
+	assert.Equal(t, 5.0, must(MustCompile(`2 + 3`).Static().FloatValue()))
+	assert.Equal(t, 0.6, must(MustCompile(`3 / 5`).Static().FloatValue()))
+	assert.Equal(t, true, must(MustCompile(`3 <> 5`).Static().BoolValue()))
+	assert.Equal(t, true, must(MustCompile(`3 != 5`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`3 == 5`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`3 = 5`).Static().BoolValue()))
+	assert.Equal(t, `"3/5:"+(a+b)+"/"+5`, MustCompile(`3 + "/" + 5 + ":" + (a + b) + "/" + 5`).String())
+	assert.Equal(t, `(a+"/")+b+":"+(a+1)+"/"+b`, MustCompile(`a + "/" + b + ":" + (a + 1) + "/" + b`).String())
+}
+
+func TestCompileLogical(t *testing.T) {
+	assert.Equal(t, "true", MustCompile(`!(false && r1)`).String())
+	assert.Equal(t, "false", MustCompile(`!true && r1`).String())
+	assert.Equal(t, "r1", MustCompile(`true && r1`).String())
+	assert.Equal(t, "r1", MustCompile(`!true || r1`).String())
+	assert.Equal(t, "true", MustCompile(`true || r1`).String())
+	assert.Equal(t, "11", MustCompile(`5 - -3 * 2`).String())
+	assert.Equal(t, "r1&&false", MustCompile(`r1 && false`).String())
+	assert.Equal(t, "bool(r1)", MustCompile(`bool(r1) && true`).String())
+	assert.Equal(t, "false", MustCompile(`bool(r1) && false`).String())
+	assert.Equal(t, "r1||false", MustCompile(`r1 || false`).String())
+	assert.Equal(t, "bool(r1)", MustCompile(`bool(r1) || false`).String())
+	assert.Equal(t, "r1||true", MustCompile(`r1 || true`).String())
+	assert.Equal(t, "true", MustCompile(`bool(r1) || true`).String())
+}
+
+func TestCompileMathOperationsPrecedence(t *testing.T) {
+	assert.Equal(t, 7.0, must(MustCompile(`1 + 2 * 3`).Static().FloatValue()))
+	assert.Equal(t, 11.0, must(MustCompile(`1 + (2 * 3) + 4`).Static().FloatValue()))
+	assert.Equal(t, 11.0, must(MustCompile(`1 + 2 * 3 + 4`).Static().FloatValue()))
+	assert.Equal(t, 30.0, must(MustCompile(`1 + 2 * 3 * 4 + 5`).Static().FloatValue()))
+	assert.Equal(t, true, must(MustCompile(`1 + 2 * 3 * 4 + 5 <> 3`).Static().BoolValue()))
+
+	assert.Equal(t, false, must(MustCompile(`1 + 2 * 3 * 4 + 5 == 3`).Static().BoolValue()))
+	assert.Equal(t, true, must(MustCompile(`1 + 2 * 3 * 4 + 5 = 30`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`1 + 2 * 3 * 4 + 5 <> 30`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`1 + 2 * 3 * 4 + 5 <> 20 + 10`).Static().BoolValue()))
+	assert.Equal(t, true, must(MustCompile(`1 + 2 * 3 * 4 + 5 = 20 + 10`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`1 + 2 * 3 * 4 + 5 <> 20 + 10`).Static().BoolValue()))
+	assert.Equal(t, true, must(MustCompile(`1 + 2 * 3 * 4 + 5 = 2 + 3 * 6 + 10`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`1 + 2 * 3 * 4 + 5 <> 2 + 3 * 6 + 10`).Static().BoolValue()))
+	assert.Equal(t, 8.0, must(MustCompile(`5 + 3 / 3 * 3`).Static().FloatValue()))
+	assert.Equal(t, true, must(MustCompile(`5 + 3 / 3 * 3 = 8`).Static().BoolValue()))
+	assert.Equal(t, 8.0, must(MustCompile(`5 + 3 * 3 / 3`).Static().FloatValue()))
+	assert.Equal(t, true, must(MustCompile(`5 + 3 * 3 / 3 = 8`).Static().BoolValue()))
+	assert.Equal(t, true, must(MustCompile(`5 + 3 * 3 / 3 = 2 + 3 * 2`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`5 + 3 * 3 / 3 = 3 + 3 * 2`).Static().BoolValue()))
+
+	assert.Equal(t, false, must(MustCompile(`true && false || false && true`).Static().BoolValue()))
+	assert.Equal(t, true, must(MustCompile(`true && false || true`).Static().BoolValue()))
+	assert.Equal(t, int64(0), must(MustCompile(`1 && 0 && 2`).Static().IntValue()))
+	assert.Equal(t, int64(2), must(MustCompile(`1 && 0 || 2`).Static().IntValue()))
+	assert.Equal(t, int64(1), must(MustCompile(`1 || 0 || 2`).Static().IntValue()))
+
+	assert.Equal(t, true, must(MustCompile(`10 > 2 && 5 <= 5`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`10 > 2 && 5 < 5`).Static().BoolValue()))
+	assert.Error(t, errOnly(Compile(`10 > 2 > 3`)))
+
+	assert.Equal(t, 817.0, must(MustCompile(`1 + 2 * 3 ** 4 * 5 + 6`).Static().FloatValue()))
+	assert.Equal(t, 4.5, must(MustCompile(`72 / 2 ** 4`).Static().FloatValue()))
+	assert.InDelta(t, 3.6, must(MustCompile(`3 * 5.2 % 4`).Static().FloatValue()), 0.00001)
+
+	assert.Equal(t, true, must(MustCompile(`!0 && 500`).Static().BoolValue()))
+	assert.Equal(t, false, must(MustCompile(`!5 && 500`).Static().BoolValue()))
+
+	assert.Equal(t, "(A+B*(C+D)/E*F)+G<>H**I*J**K", MustCompile(`A + B * (C + D) / E * F + G <> H ** I * J ** K`).String())
+}
+
+func TestBuildTemplate(t *testing.T) {
+	assert.Equal(t, "abc", MustCompile(`"abc"`).Template())
+	assert.Equal(t, "abcdef", MustCompile(`"abc" + "def"`).Template())
+	assert.Equal(t, "abc9", MustCompile(`"abc" + 9`).Template())
+	assert.Equal(t, "abc{{env.xyz}}", MustCompile(`"abc" + env.xyz`).Template())
+	assert.Equal(t, "{{env.xyz}}abc", MustCompile(`env.xyz + "abc"`).Template())
+	assert.Equal(t, "{{env.xyz+env.abc}}abc", MustCompile(`env.xyz + env.abc + "abc"`).Template())
+	assert.Equal(t, "{{env.xyz+env.abc}}abc", MustCompile(`env.xyz + env.abc + "abc"`).Template())
+	assert.Equal(t, "{{3+env.xyz+env.abc}}", MustCompile(`3 + env.xyz + env.abc`).Template())
+	assert.Equal(t, "3{{env.xyz}}{{env.abc}}", MustCompile(`string(3) + env.xyz + env.abc`).Template())
+	assert.Equal(t, "3{{env.xyz+env.abc}}", MustCompile(`string(3) + (env.xyz + env.abc)`).Template())
+	assert.Equal(t, "3{{env.xyz}}{{env.abc}}", MustCompile(`"3" + env.xyz + env.abc`).Template())
+	assert.Equal(t, "3{{env.xyz+env.abc}}", MustCompile(`"3" + (env.xyz + env.abc)`).Template())
+}
+
+func TestCompileTemplate(t *testing.T) {
+	assert.Equal(t, `""`, MustCompileTemplate(``).String())
+	assert.Equal(t, `"abc"`, MustCompileTemplate(`abc`).String())
+	assert.Equal(t, `"abcxyz5"`, MustCompileTemplate(`abc{{ "xyz" }}{{ 5 }}`).String())
+	assert.Equal(t, `"abc50"`, MustCompileTemplate(`abc{{ 5 + 45 }}`).String())
+	assert.Equal(t, `"abc50def"`, MustCompileTemplate(`abc{{ 5 + 45 }}def`).String())
+	assert.Equal(t, `"abc50def"+string(env.abc*5)+"20"`, MustCompileTemplate(`abc{{ 5 + 45 }}def{{env.abc * 5}}20`).String())
+
+	assert.Equal(t, `abc50def`, must(MustCompileTemplate(`abc{{ 5 + 45 }}def`).Static().StringValue()))
+}
+
+func TestExtractPureTemplateExpression(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantExpr string
+		wantOk   bool
+	}{
+		{`{{ ['1','2','3'] }}`, `['1','2','3']`, true},
+		{`{{ list('a','b') }}`, `list('a','b')`, true},
+		{`{{ split('x,y') }}`, `split('x,y')`, true},
+		{`{{ 5 + 3 }}`, `5 + 3`, true},
+		{`prefix{{ expr }}`, ``, false},
+		{`{{ expr }}suffix`, ``, false},
+		{`no expression`, ``, false},
+		{`{{ }}`, ``, false},
+		{`{{expr}}`, `expr`, true},
+		{`  {{ expr }}  `, `expr`, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			gotExpr, gotOk := ExtractPureTemplateExpression(tc.input)
+			assert.Equal(t, tc.wantOk, gotOk)
+			if tc.wantOk {
+				assert.Equal(t, tc.wantExpr, gotExpr)
+			}
+		})
+	}
+}
+
+func TestIsWildcardAccessorOnly(t *testing.T) {
+	tests := []struct {
+		expr string
+		want bool
+	}{
+		{"services.slave.*.ip", true},
+		{"a.b.c.*.d.e", true},
+		{"a.b.c.*.*.d.e", true},
+		{"services.slave.0.ip", false},
+		{"list('a','b','c')", false},
+		{"split('x,y,z')", false},
+		{`["a","b"]`, false},
+		{"env.MY_VAR", false},
+		// Ensure .* inside string literals is not treated as a wildcard accessor
+		{`split('192.168.*', '.')`, false},
+		{`map(items, 'v =~ ".*foo"')`, false},
+		{`"some.*value"`, false},
+		// Spaced wildcard accessors should still be detected
+		{"services.slave . * . ip", true},
+		{"a . *", true},
+		// Wildcard accessor inside explicit array-producing constructs should NOT
+		// be treated as a pure wildcard accessor (expansion should still happen).
+		{"list(services.slave.*.ip...)", false},
+		{"join(services.slave.*.ip, ',')", false},
+		// Compiled wildcard accessor forms (_wc calls produced by the compiler)
+		// should be recognized as wildcard accessors.
+		{`_wc(services.slave,"_.value.ip")`, true},
+		{`_wc(a.b.c,"_.value.d.e")`, true},
+		{`_wc(_wc(a.b.c,"_.value"),"_.value.d.e")`, true},
+		// User-written map() calls must NOT be classified as wildcard accessors,
+		// even when the second argument looks like "_.value.<path>".
+		{`map(services.slave,"_.value.ip")`, false},
+		{`map(workers,"_.value.host")`, false},
+		{`map(items,"_.value * 2")`, false},
+		{`map(items,"_.key")`, false},
+		{`map(items,"_.value.name + _.value.surname")`, false},
+		{`map(items,"_.value.x > 0")`, false},
+		{`map(items,"_.value.name + ' extra'")`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.expr, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsWildcardAccessorOnly(tc.expr))
+		})
+	}
+}
+
+func TestCompilePartialResolution(t *testing.T) {
+	vm := NewMachine().
+		Register("someint", 555).
+		Register("somestring", "foo").
+		RegisterAccessor(func(name string) (interface{}, bool) {
+			if strings.HasPrefix(name, "env.") {
+				return "[placeholder:" + name[4:] + "]", true
+			}
+			return nil, false
+		}).
+		RegisterAccessor(func(name string) (interface{}, bool) {
+			if strings.HasPrefix(name, "secrets.") {
+				return MustCompile("secret(" + name[8:] + ")"), true
+			}
+			return nil, false
+		}).
+		RegisterFunction("mainEndpoint", func(values ...StaticValue) (interface{}, bool, error) {
+			if len(values) != 0 {
+				return nil, true, errors.New("the mainEndpoint should have no parameters")
+			}
+			return MustCompile(`env.apiUrl`), true, nil
+		})
+
+	assert.Equal(t, `555`, must(MustCompile(`someint`).Resolve(vm)).String())
+	assert.Equal(t, `"[placeholder:name]"`, must(MustCompile(`env.name`).Resolve(vm)).String())
+	assert.Equal(t, `secret(name)`, must(MustCompile(`secrets.name`).Resolve(vm)).String())
+	assert.Equal(t, `"[placeholder:apiUrl]"`, must(MustCompile(`mainEndpoint()`).Resolve(vm)).String())
+}
+
+func TestCompileResolution(t *testing.T) {
+	vm := NewMachine().
+		Register("someint", 555).
+		Register("somestring", "foo").
+		RegisterAccessor(func(name string) (interface{}, bool) {
+			if strings.HasPrefix(name, "env.") {
+				return "[placeholder:" + name[4:] + "]", true
+			}
+			return nil, false
+		}).
+		RegisterAccessor(func(name string) (interface{}, bool) {
+			if strings.HasPrefix(name, "secrets.") {
+				return MustCompile("secret(" + name[8:] + ")"), true
+			}
+			return nil, false
+		}).
+		RegisterFunction("mainEndpoint", func(values ...StaticValue) (interface{}, bool, error) {
+			if len(values) != 0 {
+				return nil, true, errors.New("the mainEndpoint should have no parameters")
+			}
+			return MustCompile(`env.apiUrl`), true, nil
+		})
+
+	assert.Equal(t, `555`, must(MustCompile(`someint`).Resolve(vm, FinalizerFail)).String())
+	assert.Equal(t, `"[placeholder:name]"`, must(MustCompile(`env.name`).Resolve(vm, FinalizerFail)).String())
+	assert.Error(t, errOnly(MustCompile(`secrets.name`).Resolve(vm, FinalizerFail)))
+	assert.Equal(t, `"[placeholder:apiUrl]"`, must(MustCompile(`mainEndpoint()`).Resolve(vm, FinalizerFail)).String())
+}
+
+func TestCompileResolutionWithFinalizer(t *testing.T) {
+	vm := NewMachine().
+		Register("status", "passed").
+		RegisterAccessorExt(func(name string) (interface{}, bool, error) {
+			if name == "passed" {
+				return newMath(operatorEqualsAlias, newAccessor("status"), NewValue("passed")), true, nil
+			}
+			return nil, false, nil
+		})
+
+	expr, err := MustCompile(`string(passed)`).Resolve(vm, FinalizerFail)
+	require.NoError(t, err)
+	assert.Equal(t, `"true"`, expr.String())
+}
+
+func TestCircularResolution(t *testing.T) {
+	vm := NewMachine().
+		RegisterFunction("one", func(values ...StaticValue) (interface{}, bool, error) {
+			return MustCompile("two()"), true, nil
+		}).
+		RegisterFunction("two", func(values ...StaticValue) (interface{}, bool, error) {
+			return MustCompile("one()"), true, nil
+		}).
+		RegisterFunction("self", func(values ...StaticValue) (interface{}, bool, error) {
+			return MustCompile("self()"), true, nil
+		})
+
+	assert.Contains(t, fmt.Sprintf("%v", errOnly(MustCompile(`one()`).Resolve(vm, FinalizerFail))), "call stack exceeded")
+	assert.Contains(t, fmt.Sprintf("%v", errOnly(MustCompile(`self()`).Resolve(vm, FinalizerFail))), "call stack exceeded")
+}
+
+func TestMinusNumber(t *testing.T) {
+	assert.Equal(t, -4.0, must(MustCompile("-4").Static().FloatValue()))
+}
+
+func TestCompileMultilineString(t *testing.T) {
+	assert.Equal(t, `"\nabc\ndef\n"`, MustCompile(`"
+abc
+def
+"`).String())
+}
+
+func TestCompileEscapeTemplate(t *testing.T) {
+	assert.Equal(t, `foo{{"{{"}}barbaz{{"{{"}}`, MustCompileTemplate(`foo{{"{{bar"}}baz{{"{{"}}`).Template())
+}
+
+func TestCompileEscapeBrace(t *testing.T) {
+	assert.Equal(t, `foo{{"{"}}barbaz{{"{"}}`, MustCompileTemplate(`foo{{"{bar"}}baz{{"{"}}`).Template())
+}
+
+func TestCompileStandardLib(t *testing.T) {
+	assert.Equal(t, `false`, MustCompile(`bool(0)`).String())
+	assert.Equal(t, `true`, MustCompile(`bool(500)`).String())
+	assert.Equal(t, `"500"`, MustCompile(`string(500)`).String())
+	assert.Equal(t, `500`, MustCompile(`int(500)`).String())
+	assert.Equal(t, `500`, MustCompile(`int(500.888)`).String())
+	assert.Equal(t, `500`, MustCompile(`int("500")`).String())
+	assert.Equal(t, `500.44`, MustCompile(`float("500.44")`).String())
+	assert.Equal(t, `500`, MustCompile(`json("500")`).String())
+	assert.Equal(t, `{"a":500}`, MustCompile(`json("{\"a\": 500}")`).String())
+	assert.Equal(t, `"{\"a\":500}"`, MustCompile(`tojson({"a": 500})`).String())
+	assert.Equal(t, `"500.8"`, MustCompile(`tojson(500.8)`).String())
+	assert.Equal(t, `"\"500.8\""`, MustCompile(`tojson("500.8")`).String())
+	assert.Equal(t, `"abc"`, MustCompile(`shellquote("abc")`).String())
+	assert.Equal(t, `"'a b c'"`, MustCompile(`shellquote("a b c")`).String())
+	assert.Equal(t, `"'a b c' 'd e f'"`, MustCompile(`shellquote("a b c", "d e f")`).String())
+	assert.Equal(t, `"''"`, MustCompile(`shellquote(null)`).String())
+	assert.Equal(t, `["a","b","c","a b c"]`, MustCompile(`shellparse("a b c 'a b c'")`).String())
+	assert.Equal(t, `"abc  d"`, MustCompile(`trim("   abc  d  \n  ")`).String())
+	// sha256 over the framed argument: the kind byte, the length, then the bytes. The
+	// framing is part of the digest, so this value changed when it replaced the NUL
+	// separator - deliberately, because that separator let two different argument
+	// lists hash the same.
+	assert.Equal(t, `"4c0e77880c912423baf4c28c3ae0acbd03fd673aa879267ccea5256bf5aa9a2d"`,
+		MustCompile(`hash("abc")`).String())
+	assert.Len(t, MustCompile(`hash("abc")`).String(), 66) // 64 hex chars plus the quotes
+	// The framing is what keeps these apart.
+	assert.NotEqual(t, MustCompile(`hash("ab")`).String(), MustCompile(`hash("a","b")`).String())
+	// Non-strings hash their canonical JSON, so map key order cannot shift the digest.
+	assert.Equal(t, MustCompile(`hash({"a":1,"b":2})`).String(), MustCompile(`hash({"b":2,"a":1})`).String())
+	assert.Equal(t, `"abc"`, MustCompile(`yaml("\"abc\"")`).String())
+	assert.Equal(t, `{"foo":{"bar":"baz"}}`, MustCompile(`yaml("foo:\n  bar: 'baz'")`).String())
+	assert.Equal(t, `"foo:\n    bar: baz\n"`, MustCompile(`toyaml({"foo":{"bar":"baz"}})`).String())
+	assert.Equal(t, `{"a":["b","v"]}`, MustCompile(`yaml("
+a:
+- b
+- v
+")`).String())
+	assert.Equal(t, `["a",10,["a",4]]`, MustCompile(`list("a", 10, ["a", 4])`).String())
+	assert.Equal(t, `"a,10,a,4"`, MustCompile(`join(["a",10,["a",4]])`).String())
+	assert.Equal(t, `"a---10---a,4"`, MustCompile(`join(["a",10,["a",4]], "---")`).String())
+	assert.Equal(t, `[""]`, MustCompile(`split(null)`).String())
+	assert.Equal(t, `["a","b","c"]`, MustCompile(`split("a,b,c")`).String())
+	assert.Equal(t, `["a","b","c"]`, MustCompile(`split("a---b---c", "---")`).String())
+	assert.Equal(t, `5`, MustCompile(`len("abcde")`).String())
+	assert.Equal(t, `2`, MustCompile(`len(["a", "b"])`).String())
+	assert.Equal(t, `2`, MustCompile(`len({"a": "b", "b": "c"})`).String())
+	assert.Equal(t, `2`, MustCompile(`floor(2.6)`).String())
+	assert.Equal(t, `2`, MustCompile(`ceil(1.6)`).String())
+	assert.Equal(t, `2`, MustCompile(`round(1.6)`).String())
+	assert.Equal(t, `2`, MustCompile(`round(1.5)`).String())
+	assert.Equal(t, `1`, MustCompile(`round(1.4)`).String())
+	assert.Equal(t, `[[1,2],[3,4],[5]]`, MustCompile(`chunk([1,2,3,4,5], 2)`).String())
+	assert.Equal(t, `[2,4,6,8,10]`, MustCompile(`map([1,2,3,4,5], "_.value * 2")`).String())
+	assert.Equal(t, `[0,2,4,6,8]`, MustCompile(`map([10,20,30,40,50], "_.index * 2")`).String())
+	assert.Equal(t, `[2,4,6,8,10]`, MustCompile(`map([1,2,3,4,5], "_.value * 2")`).String())
+	assert.Equal(t, `[0,2,4,6,8]`, MustCompile(`map([10,20,30,40,50], "_.index * 2")`).String())
+	assert.ElementsMatch(t, []interface{}{MapEntry{Key: "A", Value: "B"}, MapEntry{Key: "C", Value: 5.0}}, must(MustCompile(`entries({"A": "B", "C": 5})`).Static().SliceValue()))
+	assert.Equal(t, `[3,4,5]`, MustCompile(`filter([1,2,3,4,5], "_.value > 2")`).String())
+	assert.Equal(t, `[5]`, MustCompile(`jq([1,2,3,4,5], ". | max")`).String())
+	assert.Equal(t, `[{"b":{"v":2}}]`, MustCompile(`jq([{"a":{"v": 1}},{"b":{"v": 2}}], ". | max_by(.v)")`).String())
+	assert.Equal(t, `[[3,4,5]]`, MustCompile(`jq([1,2,3,4,5], "map(select(. > 2))")`).String())
+	assert.Equal(t, `5`, MustCompile(`at([1,2,3,4,5], 4)`).String())
+	assert.Equal(t, `"value"`, MustCompile(`at({"x": "value"}, "x")`).String())
+	assert.Equal(t, `null`, MustCompile(`at({"x": "value"}, "unknown-key")`).String())
+	assert.Equal(t, `"a"`, MustCompile(`at("abc", 0)`).String())
+	assert.Equal(t, `"c"`, MustCompile(`at("abc", 2)`).String())
+	assert.Equal(t, `true`, MustCompile(`at("abc", 1) == "b"`).String())
+	// Multibyte characters are returned whole, not split into invalid UTF-8.
+	assert.Equal(t, `"é"`, MustCompile(`at("héllo", 1)`).String())
+	assert.Equal(t, `"日"`, MustCompile(`at("日本語", 0)`).String())
+	assert.Equal(t, `"語"`, MustCompile(`at("日本語", 2)`).String())
+	assert.Equal(t, `true`, MustCompile(`at("日本語", 1) == "本"`).String())
+	assert.Equal(t, `"abc"`, MustCompile(`eval("\"abc\"")`).String())
+	assert.Equal(t, `50`, MustCompile(`eval("5 * 10")`).String())
+	assert.Equal(t, `50*something`, MustCompile(`eval("5 * 10 * something")`).String())
+	assert.Equal(t, `"abc"`, MustCompile(`relpath("xyz/abc", "xyz")`).String())
+	assert.Equal(t, `"abc"`, MustCompile(`relpath("/xyz/../xyz/abc", "/xyz")`).String())
+	assert.Equal(t, `"."`, MustCompile(`relpath("/xyz", "/xyz")`).String())
+	assert.Equal(t, `"../abc"`, MustCompile(`relpath("/abc", "/xyz")`).String())
+	assert.Equal(t, `"abc/def"`, MustCompile(`relpath("/data/abc/def", "/data")`).String())
+	assert.Equal(t, `".."`, MustCompile(`relpath("/data/abc/def", "/data/abc/def/xyz")`).String())
+	assert.Equal(t, `"../ccc"`, MustCompile(`relpath("/data/abc/def/ccc", "/data/abc/def/xyz")`).String())
+	assert.Equal(t, `"/data/abc/def/ccc"`, MustCompile(`abspath("/data/abc/def/ccc", "/data")`).String())
+	assert.Equal(t, `"/data/abc/def/ccc"`, MustCompile(`abspath("/data/abc/def/ccc", "/abc")`).String())
+	assert.Equal(t, `"/data/abc/def/ccc"`, MustCompile(`abspath("def/ccc", "/data/abc")`).String())
+	assert.Equal(t, `"/data"`, MustCompile(`abspath("..", "/data/abc")`).String())
+	assert.Equal(t, `"/data"`, MustCompile(`makepath("", "/data")`).String())
+	assert.Equal(t, `"data"`, MustCompile(`makepath("", "data")`).String())
+	assert.Equal(t, `"/parent/data"`, MustCompile(`makepath("/parent", "data")`).String())
+	assert.Equal(t, `[]`, MustCompile(`range(0, 0)`).String())
+	assert.Equal(t, `[]`, MustCompile(`range(0)`).String())
+	assert.Equal(t, `[]`, MustCompile(`range(0, -3)`).String())
+	assert.Equal(t, `[]`, MustCompile(`range(5, 3)`).String())
+	assert.Equal(t, `[0,1,2,3,4]`, MustCompile(`range(5)`).String())
+	assert.Equal(t, `[5,6,7]`, MustCompile(`range(5, 8)`).String())
+	assert.Equal(t, `10`, MustCompile(`any(10, 20, 30, 10)`).String())
+	assert.Equal(t, `10`, MustCompile(`any(10, unknownVariable, 30, 10)`).String())
+	assert.Equal(t, `30`, MustCompile(`any(unknownVariable, 30, 10)`).String())
+	assert.Equal(t, `30`, MustCompile(`any(unknownCall(), 30, 10)`).String())
+	assert.Equal(t, `30`, MustCompile(`any(unknownCall(unknownVariable), 30, 10)`).String())
+	assert.Equal(t, `30`, MustCompile(`any(30, unknownCall(), 10)`).String())
+	assert.Equal(t, `30`, MustCompile(`any(30, unknownCall(unknownVariable), 10)`).String())
+	assert.Equal(t, `20`, MustCompile(`any([20, 44, 30]..., 10)`).String())
+	assert.Equal(t, `20`, MustCompile(`any(unknown, [20, 44, 30]..., 10)`).String())
+	assert.Equal(t, `null`, MustCompile(`any()`).String())
+	assert.InDelta(t, time.Now().UnixMilli(), must(time.Parse(RFC3339Millis, must(MustCompile(`date()`).Static().StringValue()))).UnixMilli(), 5)
+	assert.Equal(t, time.Now().Truncate(24*time.Hour).UnixMilli(), must(time.Parse("2006-01-02", must(MustCompile(`date("2006-01-02")`).Static().StringValue()))).UnixMilli())
+}
+
+// TestCompileHashDefersFileArgument pins the property the step cache depends on.
+//
+// A cache key such as 'npm-{{ hash(file("package-lock.json")) }}' is compiled on the
+// control plane, where no filesystem machine is registered and the repository has not
+// been cloned. hash() is a stdlib function, and StdLibMachine is consulted before any
+// other, so the only thing stopping it from folding to a digest of nothing is that
+// ToStdFunctionHandler declines while an argument is still an unresolved call. If that
+// ever changes, every cache key in every workflow silently collapses onto one value,
+// so assert it directly rather than by inference.
+func TestCompileHashDefersFileArgument(t *testing.T) {
+	assert.Equal(t, `hash(file("package-lock.json"))`, MustCompile(`hash(file("package-lock.json"))`).String())
+	assert.Equal(t, `hash(hash_files("*.lock"))`, MustCompile(`hash(hash_files("*.lock"))`).String())
+	// Still deferred when only one of several arguments is unresolved.
+	assert.Equal(t, `hash("npm",file("go.sum"))`, MustCompile(`hash("npm", file("go.sum"))`).String())
+	// A fully literal argument folds, which is both harmless and wanted.
+	assert.Equal(t, `"4c0e77880c912423baf4c28c3ae0acbd03fd673aa879267ccea5256bf5aa9a2d"`,
+		MustCompile(`hash("abc")`).String())
+}
+
+func TestCompileWildcard_Unknown(t *testing.T) {
+	assert.Equal(t, `_wc(a.b.c,"_.value.d.e")`, MustCompile("a.b.c.*.d.e").String())
+	assert.Equal(t, `_wc(_wc(a.b.c,"_.value"),"_.value.d.e")`, MustCompile("a.b.c.*.*.d.e").String())
+}
+
+func TestCompileSpread(t *testing.T) {
+	assert.Equal(t, `"a b c 'a b c'"`, MustCompile(`shellquote(["a", "b", "c", "a b c"]...)`).String())
+	assert.Equal(t, `"a b c 'a b c'"`, MustCompile("shellquote(shellparse(\"a b c\n'a b c'\")...)").String())
+	assert.Equal(t, `"axb"`, MustCompile(`join([["a", "b"], "x"]...)`).String())
+}
+
+func TestCompileWildcard_Map(t *testing.T) {
+	vm := NewMachine().Register("a.b.c", []map[string]interface{}{
+		{"d": map[string]string{"e": "v1"}},
+		{"d": map[string]string{"e": "v2"}},
+	})
+	assert.Equal(t, `["v1","v2"]`, must(MustCompile("a.b.c.*.d.e").Resolve(vm)).String())
+}
+
+func TestCompileWildcard_Struct(t *testing.T) {
+	type S1 struct {
+		Else string `json:"e"`
+	}
+	type S2 struct {
+		Something S1 `json:"d"`
+	}
+	vm := NewMachine().Register("a.b.c", []S2{
+		{Something: S1{Else: "v1"}},
+		{Something: S1{Else: "v2"}},
+	})
+	assert.Equal(t, `["v1","v2"]`, must(MustCompile("a.b.c.*.d.e").Resolve(vm)).String())
+}
+
+func TestCompileWildcard_Inner(t *testing.T) {
+	type S1 struct {
+		Else string `json:"e"`
+	}
+	type S2 struct {
+		Something S1 `json:"d"`
+	}
+	vm := NewMachine().Register("a.b", map[string]interface{}{
+		"c": []S2{
+			{Something: S1{Else: "v1"}},
+			{Something: S1{Else: "v2"}},
+		},
+	})
+	assert.Equal(t, `["v1","v2"]`, must(MustCompile("a.b.c.*.d.e").Resolve(vm)).String())
+}
+
+func TestCompileInnerPath(t *testing.T) {
+	assert.Equal(t, `"v1"`, MustCompile(`["v1", "v2"].0`).String())
+	assert.Equal(t, `"v1abc"`, must(MustCompile(`map(["v1", "v2"], "_.value + \"abc\"").0`).Resolve()).String())
+	assert.Equal(t, `"v"`, must(MustCompile(`{"k": "v", "k2":"v2"}.k`).Resolve()).String())
+	assert.Equal(t, `"v"`, must(MustCompile(`{"k": {"a": "v"}, "k2":"v2"}.k.a`).Resolve()).String())
+}
+
+func TestCompileDetectAccessors(t *testing.T) {
+	assert.Equal(t, map[string]struct{}{"something": {}}, MustCompile(`something`).Accessors())
+	assert.Equal(t, map[string]struct{}{"something": {}, "other": {}, "another": {}}, MustCompile(`calling(something, 5 * (other + 3), !another)`).Accessors())
+}
+
+func TestCompileDetectFunctions(t *testing.T) {
+	assert.Equal(t, map[string]struct{}(nil), MustCompile(`something`).Functions())
+	assert.Equal(t, map[string]struct{}{"calling": {}, "something": {}, "string": {}, "a": {}}, MustCompile(`calling(something(), 45 + 2 + 10 + string(abc * a(c)))`).Functions())
+}
+
+func TestCompileImmutableNone(t *testing.T) {
+	assert.Same(t, None, NewValue(noneValue))
+	assert.Same(t, NewValue(noneValue), NewValue(noneValue))
+}
+
+func TestCompileEscapedTemplate(t *testing.T) {
+	input := `{{"{{"}}- with secret "internal/data/database/config" -}}{{"{{"}} .Data.data.username }}@{{"{{"}} .Data.data.password }}{{"{{"}}- end -}}`
+	output := `{{- with secret "internal/data/database/config" -}}{{ .Data.data.username }}@{{ .Data.data.password }}{{- end -}}`
+
+	assert.Equal(t, input, MustCompileTemplate(input).Template())
+	assert.Equal(t, output, must(MustCompileTemplate(input).Static().StringValue()))
+}
+
+func TestCompileSingleQuoteString(t *testing.T) {
+	assert.Equal(t, `"foobar"`, MustCompile(`'foobar'`).String())
+	assert.Equal(t, `"foo'bar"`, MustCompile(`'foo\'bar'`).String())
+	assert.Equal(t, `"foo\"bar"`, MustCompile(`'foo"bar'`).String())
+	assert.ErrorContains(t, errOnly(Compile(`'foobar\'`)), "error while decoding string")
+	assert.Equal(t, `"\nabc\ndef\n"`, MustCompile(`'
+abc
+def
+'`).String())
+}
+
+// TestTemplateExpressions pins that the parts a caller judges are the parts the template
+// actually resolves, including where a naive split would get it wrong.
+func TestTemplateExpressions(t *testing.T) {
+	for _, tc := range []struct {
+		tpl  string
+		want []string
+	}{
+		{tpl: "", want: nil},
+		{tpl: "no expressions here", want: nil},
+		{tpl: "{{ env.HOME }}", want: []string{"env.HOME"}},
+		{tpl: `npm-{{ hash_files("package-lock.json") }}`, want: []string{`hash_files("package-lock.json")`}},
+		{
+			tpl:  `{{ a }}-and-{{ b }}`,
+			want: []string{"a", "b"},
+		},
+		// The case a regex over "{{...}}" gets wrong: the first "}}" is inside a string
+		// literal and does not end the expression.
+		{tpl: `x-{{ trim("a}}b") }}-y`, want: []string{`trim("a}}b")`}},
+		// An empty pair contributes nothing to the result, so there is nothing to judge.
+		{tpl: "a{{}}b", want: nil},
+	} {
+		got, err := TemplateExpressions(tc.tpl)
+		assert.NoError(t, err, "%q", tc.tpl)
+		assert.Equal(t, tc.want, got, "%q", tc.tpl)
+	}
+}
+
+// TestTemplateExpressionsAgreesWithTheCompiler is the property that makes the accessor
+// safe to judge by: it finds an expression exactly when compiling finds one, so a caller
+// cannot end up inspecting a different set of parts than the template resolves.
+func TestTemplateExpressionsAgreesWithTheCompiler(t *testing.T) {
+	for _, tpl := range []string{
+		"", "plain", "{{ 1 + 2 }}", "a{{ 1 }}b{{ 2 }}c", `{{ trim("a}}b") }}`, "a{{}}b",
+	} {
+		_, compileErr := CompileTemplate(tpl)
+		_, extractErr := TemplateExpressions(tpl)
+		assert.Equal(t, compileErr == nil, extractErr == nil,
+			"%q: the two have to agree on whether the template parses", tpl)
+	}
+}
+
+// TestHashFramesArgumentsUnambiguously covers the collision a separator cannot avoid.
+//
+// The arguments were joined with a NUL byte, which only separates if a NUL cannot occur
+// inside one. It can: file() hands the bytes of a file through as a string, so any binary
+// input carries them. hash("a", "b") and hash("a\x00b") both came to a\x00b\x00, so two
+// different dependency sets produced one cache key - and the second run restored what the
+// first had stored.
+func TestHashFramesArgumentsUnambiguously(t *testing.T) {
+	hash := func(args ...string) string {
+		quoted := make([]string, len(args))
+		for i, a := range args {
+			b, err := json.Marshal(a)
+			require.NoError(t, err)
+			quoted[i] = string(b)
+		}
+		out, err := EvalTemplate("{{ hash(" + strings.Join(quoted, ",") + ") }}")
+		require.NoError(t, err)
+		return out
+	}
+
+	// The case that collided.
+	assert.NotEqual(t, hash("a", "b"), hash("a\x00b"))
+
+	// And the family it belongs to: where the split falls has to matter, wherever the
+	// NUL bytes are.
+	assert.NotEqual(t, hash("a\x00", "b"), hash("a", "\x00b"))
+	assert.NotEqual(t, hash("", "ab"), hash("ab", ""))
+	assert.NotEqual(t, hash("a", "b", "c"), hash("a\x00b", "c"))
+
+	// The original property still holds.
+	assert.NotEqual(t, hash("a", "b"), hash("ab"))
+
+	// And the same input still hashes the same way, or no cache would ever hit.
+	assert.Equal(t, hash("a", "b"), hash("a", "b"))
+	assert.Len(t, hash("a"), 64)
+}

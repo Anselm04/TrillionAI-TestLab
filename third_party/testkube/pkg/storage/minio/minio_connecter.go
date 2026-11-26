@@ -1,0 +1,182 @@
+package minio
+
+import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"net/http"
+	"os"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/pkg/errors"
+	"go.uber.org/zap"
+)
+
+type Option func(*Connecter) error
+
+// Secure is an Option to enable TLS secure connections with default verification.
+func Secure() Option {
+	return func(o *Connecter) error {
+		if o.TlsConfig == nil {
+			o.TlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		o.Ssl = true
+		return nil
+	}
+}
+
+// Insecure is an Option to enable TLS secure connections that skip server verification.
+func Insecure() Option {
+	return func(o *Connecter) error {
+		if o.TlsConfig == nil {
+			o.TlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		o.TlsConfig.InsecureSkipVerify = true
+		o.Ssl = true
+		return nil
+	}
+}
+
+// RootCAs is a helper option to provide the RootCAs pool from a list of filenames.
+// If Secure is not already set this will set it as well.
+func RootCAs(file ...string) Option {
+	return func(o *Connecter) error {
+		pool := x509.NewCertPool()
+		for _, f := range file {
+			rootPEM, err := os.ReadFile(f)
+			if err != nil || rootPEM == nil {
+				return fmt.Errorf("minio: error loading or parsing rootCA file: %v", err)
+			}
+			ok := pool.AppendCertsFromPEM(rootPEM)
+			if !ok {
+				return fmt.Errorf("minio: failed to parse root certificate from %q", f)
+			}
+		}
+		if o.TlsConfig == nil {
+			o.TlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		o.TlsConfig.RootCAs = pool
+		o.Ssl = true
+		return nil
+	}
+}
+
+// ClientCert is a helper option to provide the client certificate from a file.
+// If Secure is not already set this will set it as well.
+func ClientCert(certFile, keyFile string) Option {
+	return func(o *Connecter) error {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("minio: error loading client certificate: %v", err)
+		}
+		cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return fmt.Errorf("minio: error parsing client certificate: %v", err)
+		}
+		if o.TlsConfig == nil {
+			o.TlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		o.TlsConfig.Certificates = []tls.Certificate{cert}
+		o.Ssl = true
+		return nil
+	}
+}
+
+// VirtualHostedStyle is an Option to enable virtual-hosted-style URLs for S3-compatible storage.
+// When enabled, the bucket name is part of the hostname (e.g., bucket.endpoint.com)
+// instead of being in the path (e.g., endpoint.com/bucket).
+func VirtualHostedStyle() Option {
+	return func(o *Connecter) error {
+		o.UseVirtualHostedStyle = true
+		return nil
+	}
+}
+
+type Connecter struct {
+	Endpoint              string
+	AccessKeyID           string
+	SecretAccessKey       string
+	Region                string
+	Token                 string
+	Bucket                string
+	Ssl                   bool
+	UseVirtualHostedStyle bool
+	TlsConfig             *tls.Config
+	Opts                  []Option
+	Log                   *zap.SugaredLogger
+	client                *minio.Client
+	// customTransport overrides the default transport when set. Intended for testing only.
+	customTransport http.RoundTripper
+}
+
+// NewConnecter creates a new Connecter
+func NewConnecter(endpoint, accessKeyID, secretAccessKey, region, token, bucket string, log *zap.SugaredLogger, opts ...Option) *Connecter {
+	c := &Connecter{
+		Endpoint:        endpoint,
+		AccessKeyID:     accessKeyID,
+		SecretAccessKey: secretAccessKey,
+		Region:          region,
+		Token:           token,
+		Bucket:          bucket,
+		Opts:            opts,
+		Log:             log,
+	}
+	return c
+}
+
+// GetClient() connects to MinIO
+func (c *Connecter) GetClient() (*minio.Client, error) {
+	if c.client != nil {
+		return c.client, nil
+	}
+
+	for _, opt := range c.Opts {
+		if err := opt(c); err != nil {
+			return nil, errors.Wrapf(err, "error connecting to server")
+		}
+	}
+	creds := credentials.NewIAM("")
+	c.Log.Debugw("connecting to server",
+		"endpoint", c.Endpoint,
+		"accessKeyID", c.AccessKeyID,
+		"region", c.Region,
+		"token", c.Token,
+		"bucket", c.Bucket,
+		"ssl", c.Ssl,
+		"useVirtualHostedStyle", c.UseVirtualHostedStyle)
+	if c.AccessKeyID != "" && c.SecretAccessKey != "" {
+		creds = credentials.NewStaticV4(c.AccessKeyID, c.SecretAccessKey, c.Token)
+	}
+	transport, err := minio.DefaultTransport(c.Ssl)
+	if err != nil {
+		c.Log.Errorw("error creating minio transport", "error", err)
+		return nil, err
+	}
+	transport.TLSClientConfig = c.TlsConfig
+	var roundTripper http.RoundTripper = transport
+	if c.customTransport != nil {
+		roundTripper = c.customTransport
+	}
+	opts := &minio.Options{
+		Creds:     creds,
+		Secure:    c.Ssl,
+		Transport: roundTripper,
+	}
+	if c.Region != "" {
+		opts.Region = c.Region
+	}
+	// When UseVirtualHostedStyle is enabled, force DNS (virtual-hosted-style) bucket lookup.
+	// Otherwise, leave BucketLookup unset so that minio-go can use its default/auto behavior.
+	if c.UseVirtualHostedStyle {
+		opts.BucketLookup = minio.BucketLookupDNS
+	}
+	mclient, err := minio.New(c.Endpoint, opts)
+	if err != nil {
+		c.Log.Errorw("error connecting to minio", "error", err)
+		return nil, err
+	}
+
+	c.client = mclient
+	return mclient, nil
+}
