@@ -51,8 +51,6 @@ jobs:
           test -d "$operator/config/crd/bases"
           kubectl apply -f "$operator/config/crd/bases"
           kubectl wait --for=condition=Established crd --all --timeout=120s
-          docker pull busybox:1.36.1
-          "$RUNNER_TEMP/kind" load docker-image busybox:1.36.1 --name testlab
       - name: Start disposable supporting services
         run: |
           set -euo pipefail
