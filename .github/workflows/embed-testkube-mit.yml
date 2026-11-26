@@ -23,7 +23,7 @@ jobs:
           test ! -e third_party/testkube
           git read-tree --prefix=third_party/testkube/ -u "$tree"
           test "$(git rev-parse "$(git write-tree):third_party/testkube")" = "$tree"
-          git rm -- third_party/testkube/docs/docs/articles/slack-integration.md
+          git rm -f -- third_party/testkube/docs/docs/articles/slack-integration.md
           embedded="$(git rev-parse "$(git write-tree):third_party/testkube")"
           test "$(git diff --name-status "$tree" "$embedded")" = "$(printf 'D\tdocs/docs/articles/slack-integration.md')"
           # Check for accidentally included private key material or credentials before pushing.
