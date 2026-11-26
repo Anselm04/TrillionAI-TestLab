@@ -45,6 +45,7 @@ while IFS=$'\t' read -r origin version commit packages; do
   # container without credentials, privileged mode, or the host Docker socket.
   docker run --rm --cap-drop ALL --security-opt no-new-privileges \
     -e SRCDEST=/distfiles -e CARCH=x86_64 \
+    -e DISTFILES_MIRROR=https://distfiles.alpinelinux.org/distfiles/v3.22 \
     -v "$work:/recipe" -v "$dest/distfiles:/distfiles" -w /recipe \
     --entrypoint sh testlab-local/alpine-source-collector:3.22 -ec '
       . ./APKBUILD
