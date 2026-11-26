@@ -36,3 +36,20 @@ test('invalid result and invented successful observation are rejected', () => {
   assert.throws(()=>planRequestedChecks(['security','security']),/Duplicate/);
   assert.throws(()=>summarizeExecutedChecks(plan,[{checkId:'fictional.check',status:'PASSED',exitCode:0}]),/not in the declared plan/);
 });
+
+test('summary rejects pre-populated outcomes and evidence in an unexecuted plan', () => {
+  for (const change of [{status:'PASSED'}, {evidence:['unverified']}]) {
+    const plan = planRequestedChecks(['functional']);
+    Object.assign(plan.checks[0], change);
+    assert.throws(() => summarizeExecutedChecks(plan, []), /Invalid plan check/);
+  }
+});
+
+test('summary rejects duplicate domains and inconsistent declared check identities', () => {
+  const plan = planRequestedChecks(['functional', 'payments']);
+  plan.checks[1].checkId = 'node.builtin-test';
+  assert.throws(() => summarizeExecutedChecks(plan, []), /Invalid plan check/);
+  const duplicate = planRequestedChecks(['functional']);
+  duplicate.checks.push({...duplicate.checks[0]});
+  assert.throws(() => summarizeExecutedChecks(duplicate, []), /Invalid plan check/);
+});

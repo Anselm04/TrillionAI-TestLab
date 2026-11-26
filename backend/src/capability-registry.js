@@ -77,6 +77,16 @@ export function planRequestedChecks(requestedDomains, supportedCheckIds = IMPLEM
 
 export function summarizeExecutedChecks(plan, observations) {
   if (!Array.isArray(plan?.checks) || !Array.isArray(observations)) throw new TypeError('Invalid plan or observations');
+  const domains = new Set();
+  for (const check of plan.checks) {
+    if (!check || typeof check.domain !== 'string' || !check.domain.trim() || check.domain.length > 300 ||
+        domains.has(check.domain) || check.status !== 'NOT_EXECUTED' ||
+        !Array.isArray(check.evidence) || check.evidence.length !== 0 ||
+        (check.checkId !== null && !IMPLEMENTED_CHECKS.some(entry => entry.id === check.checkId && entry.domain === check.domain))) {
+      throw new Error('Invalid plan check');
+    }
+    domains.add(check.domain);
+  }
   const allowed = new Set(['PASSED', 'FAILED', 'TIMEOUT', 'INFRASTRUCTURE_ERROR']);
   const ids = new Set();
   for (const observation of observations) {
