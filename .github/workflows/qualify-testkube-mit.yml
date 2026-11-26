@@ -1,0 +1,65 @@
+name: Qualify Testkube MIT baseline
+on:
+  push:
+    branches: [feat/testkube-mit-qualification]
+    paths: ['.github/workflows/qualify-testkube-mit.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.ref == 'refs/heads/feat/testkube-mit-qualification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - name: Fetch exact MIT candidate without executing upstream scripts
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/kubeshop/testkube.git 45dc266f4d502b1a91e036fad1f24e569bb1d6c5
+          test "$(git rev-parse 'FETCH_HEAD^{tree}')" = e734070a9f0df684fa03c5b15c819d7e3f4aa725
+          git archive FETCH_HEAD | tar -x -C "$(mkdir -p "$RUNNER_TEMP/testkube"; echo "$RUNNER_TEMP/testkube")"
+          grep -q '^MIT License' "$RUNNER_TEMP/testkube/LICENSE"
+          git ls-tree -r FETCH_HEAD > "$RUNNER_TEMP/testkube-tree.txt"
+      - name: Inventory license files and restricted markers
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/testkube"
+          find . -type f \( -iname '*license*' -o -iname '*copyright*' -o -iname '*notice*' -o -iname '*copying*' \) | sort
+          grep -rilE 'Testkube Community License|Licensed as a Testkube Pro file|SPDX-License-Identifier:' --include='*.go' . || test "$?" = 1
+          go mod download
+          go mod verify
+          go list -mod=readonly -m all > "$RUNNER_TEMP/testkube-modules.txt"
+      - name: Resolve and compile candidate binaries
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/testkube"
+          go list -mod=readonly -deps ./cmd/api-server ./cmd/kubectl-testkube > "$RUNNER_TEMP/testkube-deps.txt"
+          go build -mod=readonly -o "$RUNNER_TEMP/testkube-api" ./cmd/api-server
+          go build -mod=readonly -o "$RUNNER_TEMP/testkube-cli" ./cmd/kubectl-testkube
+      - name: Collect dependency license inventory
+        run: |
+          cd "$RUNNER_TEMP/testkube"
+          go list -mod=readonly -deps -f '{{if .Module}}{{.Module.Path}} {{.Module.Version}} {{.Module.Dir}}{{end}}' ./cmd/api-server ./cmd/kubectl-testkube | sort -u > "$RUNNER_TEMP/testkube-module-dirs.txt"
+          while read -r module version dir; do
+            if [ -d "$dir" ]; then
+              printf '%s %s\n' "$module" "$version"
+              find "$dir" -maxdepth 1 -type f \( -iname 'license*' -o -iname 'copying*' -o -iname 'notice*' \) -print
+            fi
+          done < "$RUNNER_TEMP/testkube-module-dirs.txt" > "$RUNNER_TEMP/testkube-license-inventory.txt"
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testkube-mit-qualification
+          path: |
+            ${{ runner.temp }}/testkube-tree.txt
+            ${{ runner.temp }}/testkube-modules.txt
+            ${{ runner.temp }}/testkube-deps.txt
+            ${{ runner.temp }}/testkube-module-dirs.txt
+            ${{ runner.temp }}/testkube-license-inventory.txt
+          if-no-files-found: warn
