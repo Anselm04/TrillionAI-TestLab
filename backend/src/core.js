@@ -62,6 +62,7 @@ export async function executeRun({ workspaceRoot, reportRoot, project, runner = 
   const status = observation.status;
   const report = sealReport({
     schemaVersion: 1, id, project, profile: 'node-built-in-tests',
+    sourceRevision: {status:'UNKNOWN',sha:null,reason:'Local workspace is not an immutable revision snapshot'},
     startedAt: start, finishedAt: new Date().toISOString(), status,
     checks: [{ name: 'Node.js built-in test suite', status, exitCode: result.exitCode ?? null }],
     scope: 'Initial Node.js test runner only. NOT a production-readiness certificate.',

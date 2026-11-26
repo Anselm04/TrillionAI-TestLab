@@ -32,6 +32,7 @@ test('test runs save evidence of real runner return code', async () => {
   assert.equal(report.status,'FAILED');
   assert.equal(report.observations[0].status,'FAILED');
   assert.equal(report.productionReady,false);
+  assert.deepEqual(report.sourceRevision,{status:'UNKNOWN',sha:null,reason:'Local workspace is not an immutable revision snapshot'});
   assert.equal(verifyReportChecksum(report),true);
   assert.equal(JSON.parse(await readFile(join(reports,report.id+'.json'))).status,'FAILED');
 });

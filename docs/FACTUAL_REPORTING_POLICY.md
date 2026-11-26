@@ -22,6 +22,8 @@ AI analysis is commentary. It must not overwrite the tool-produced execution obs
 ## Integrity
 A checksum detects changes to a report given the original trusted checksum. A standalone checksum does NOT prove origin, prevent a privileged operator from rewriting history, or replace a signed attestation. Signed immutable evidence will require a dedicated later implementation and threat-model review.
 
+Local workspace reports explicitly record `sourceRevision.status: UNKNOWN` because the initial runner mounts a mutable working directory rather than a verified immutable revision. These results must not be treated as qualification of a specific Git commit. Stored report retrieval checks the report ID and checksum; missing reports return 404, while unavailable or inconsistent reports return 503. The coverage-summary helper checks the presence of all declared categories and nonblank evidence references; references alone are not independent proof of execution.
+
 ## Public repository and sensitive information
 The current Phase 1 runner captures terminal output into local JSON reports. Do not feed it production secrets, personal records, or untrusted third-party projects. Sanitization and separate secure evidence retention are prerequisites to supporting real customers.
 
