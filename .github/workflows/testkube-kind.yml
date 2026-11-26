@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      KUBECONFIG: ${{ runner.temp }}/testlab-kind-config
+      KUBECONFIG: /tmp/testlab-kind-config
       TESTKUBE_NAMESPACE: testkube
       TESTKUBE_ANALYTICS_ENABLED: 'false'
       TESTKUBE_CLOUD_API_KEY: ''
