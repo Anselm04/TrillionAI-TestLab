@@ -1,8 +1,8 @@
-import { realpath, mkdir, writeFile } from 'node:fs/promises';
+import { realpath, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { makeObservation, sealReport } from './evidence.js';
+import { makeObservation, sealReport, verifyReportChecksum } from './evidence.js';
 import { runDockerLifecycle } from './docker-lifecycle.js';
 
 export async function resolveProject(root, name) {
@@ -12,6 +12,19 @@ export async function resolveProject(root, name) {
   const rel = relative(rootPath, projectPath);
   if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) throw new Error('Project outside workspace');
   return projectPath;
+}
+
+// The stored checksum detects accidental corruption, not hostile replacement.
+export async function readStoredReport(reportRoot, id) {
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new Error('Invalid report ID');
+  let data;
+  try { data = await readFile(join(reportRoot,id+'.json'),'utf8'); }
+  catch (err) { if (err.code === 'ENOENT') return null; throw err; }
+  let report;
+  try { report = JSON.parse(data); }
+  catch { throw new Error('Report integrity check failed'); }
+  if (report?.id !== id || !verifyReportChecksum(report)) throw new Error('Report integrity check failed');
+  return report;
 }
 
 export function runProcess(binary, args, { timeoutMs = 120000, outputLimit = 128000, binaryOutput = false } = {}) {

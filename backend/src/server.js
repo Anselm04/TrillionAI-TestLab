@@ -1,7 +1,6 @@
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { executeRun } from './core.js';
+import { resolve } from 'node:path';
+import { executeRun, readStoredReport } from './core.js';
 import { createTestkubeClient } from './testkube-client.js';
 import { DurableDeviceLeases } from './durable-device-leases.js';
 import { MobileJobs } from './mobile-jobs.js';
@@ -93,10 +92,12 @@ const server = http.createServer(async (req, res) => {
     } catch (err) { return send(res, 400, { error: err.message }); }
     finally { active = false; }
   }
-  const match = /^\/runs\/([0-9a-f-]{36})$/.exec(req.url || '');
+  const match = /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(req.url || '');
   if (match && req.method === 'GET') {
-    try { return send(res, 200, JSON.parse(await readFile(join(reportRoot, match[1] + '.json'), 'utf8'))); }
-    catch { return send(res, 404, { error: 'Not found' }); }
+    try {
+      const report = await readStoredReport(reportRoot,match[1]);
+      return report ? send(res,200,report) : send(res,404,{error:'Not found'});
+    } catch { return send(res,503,{error:'REPORT_UNAVAILABLE'}); }
   }
   return send(res, 404, { error: 'Not found' });
 });
