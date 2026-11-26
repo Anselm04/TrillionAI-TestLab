@@ -2,7 +2,7 @@ name: Testkube real Kubernetes integration
 on:
   push:
     branches: [feat/testkube-mit-qualification]
-    paths: ['.github/workflows/testkube-kind.yml']
+    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js']
   workflow_dispatch:
 permissions:
   contents: read
@@ -167,7 +167,7 @@ jobs:
               const direct=await fetch(process.env.TESTLAB_TESTKUBE_ORIGIN+'/v1/tests/'+name+'/executions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:probeName}),signal:AbortSignal.timeout(15000)});
               const raw=await direct.text();
               let parsed;try{parsed=JSON.parse(raw);}catch{parsed={};}
-              console.error('Direct engine contract probe:',JSON.stringify({httpStatus:direct.status,keys:Object.keys(parsed),idPresent:typeof parsed.id==='string',nameMatches:parsed.name===probeName,testNameMatches:parsed.testName===name,status:parsed.executionResult?.status}));
+              console.error('Direct engine contract probe:',JSON.stringify({httpStatus:direct.status,keys:Object.keys(parsed),idPresent:typeof parsed.id==='string',nameMatches:parsed.name===probeName+'-'+parsed.number,testNameMatches:parsed.testName===name,status:parsed.executionResult?.status}));
             }
             assert.equal(response.status,202);
             let observation=await response.json();
