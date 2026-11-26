@@ -1,3 +1,5 @@
+import {observationDigest} from '../src/hcie-review-evidence.js';
+const reviewed=(task,result)=>({...result,reviewEvidence:{accepted:true,reviewerId:'fixture-reviewer',reviewerDefinitionSha256:'d'.repeat(64),observationSha256:observationDigest(task,result),chunkSha256:task.chunkSha256}});
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm,writeFile} from 'node:fs/promises';
@@ -18,7 +20,7 @@ async function fixture(t,extra={}){
  const q=new HcieMapQueue(db,options);
  return {q,db,options,input:{chunks,path:entry.path,expectedManifestSha256:manifest.chunkManifestSha256}};
 }
-const result=t=>({status:'ANALYZED',summary:'Observed source only',chunkId:t.chunkId,chunkSha256:t.chunkSha256,policySha256:t.policySha256});
+const result=t=>reviewed(t,{status:'ANALYZED',summary:'Observed source only',chunkId:t.chunkId,chunkSha256:t.chunkSha256,policySha256:t.policySha256});
 test('idempotent enqueue, bounded cursor, exclusive claims, bound results',async t=>{
  const {q,input}=await fixture(t);try{
  const a=q.enqueue({...input,limit:1});assert.equal(a.added,1);assert.equal(a.hasMore,true);
@@ -42,5 +44,15 @@ test('quota transaction and manifest mismatch fail closed',async t=>{
  assert.throws(()=>q.enqueue({...input,expectedManifestSha256:'d'.repeat(64)}),/binding/);
  assert.throws(()=>q.enqueue(input),/quota/);assert.equal(q.page().entries.length,0);
  assert.equal(q.enqueue({...input,limit:1}).added,1);
+ }finally{q.close();}
+});
+
+test('direct completion without bound review evidence is rejected',async t=>{
+ const {q,input}=await fixture(t);try{
+ q.enqueue(input);const x=q.claim();
+ assert.throws(()=>q.complete({...x,result:{...result(x),reviewEvidence:null}}),/review evidence/);
+ assert.throws(()=>q.complete({...x,result:{...result(x),summary:'changed after review'}}),/review evidence/);
+ assert.equal(q.complete({...x,result:result(x)}),true);
+ assert.equal(q.page().entries[0].result.reviewEvidence.reviewerId,'fixture-reviewer');
  }finally{q.close();}
 });

@@ -23,14 +23,16 @@ export async function runMapWorkerOnce({queue,store,chunks,analyze,review,checkC
   const observation=await analyze({scope,bytes:source.bytes,signal:stop});
   guard();
   if(!observation||!['ANALYZED','INCOMPLETE'].includes(observation.status)||typeof observation.summary!=='string'||observation.summary.length>16384||Buffer.byteLength(observation.summary)>65536)throw Error('Invalid analyzer observation');
-  if(observation.status==='ANALYZED'){
+  let evidence=null;
+  const candidate=Object.freeze({status:observation.status,summary:observation.summary});
+  if(candidate.status==='ANALYZED'){
    if(await checkCapacity()!==true)throw Error('Review capacity unavailable');
    guard();
-   const accepted=await reviewMapObservation({scope,observation,review,signal:stop,readAgain:()=>readVerifiedChunk({store,chunks,path:task.path,index:task.index,expectedRevisionSha256:task.revisionSha256,expectedManifestSha256:task.manifestSha256,signal:stop})});
+   evidence=await reviewMapObservation({scope,observation:candidate,review,signal:stop,readAgain:()=>readVerifiedChunk({store,chunks,path:task.path,index:task.index,expectedRevisionSha256:task.revisionSha256,expectedManifestSha256:task.manifestSha256,signal:stop})});
    guard();
-   if(!accepted)return finish({status:'INCOMPLETE',summary:'Independent review did not accept observation.'});
+   if(!evidence)return finish({status:'INCOMPLETE',summary:'Independent review did not accept observation.'});
   }
-  return finish({status:observation.status,summary:observation.summary});
+  return finish({...candidate,reviewEvidence:evidence});
  }catch{
   if(stop.aborted||Date.now()>=task.expiresAt)return {taskId:task.taskId,status:'INTERRUPTED'};
   return finish({status:'INCOMPLETE',summary:'Source retrieval, capacity or analysis failed; no verified conclusion.'});

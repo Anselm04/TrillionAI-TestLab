@@ -11,5 +11,6 @@ export async function reviewMapObservation({scope,observation,readAgain,review,s
  const observationSha256=hash(JSON.stringify({taskId:scope.taskId,revisionSha256:scope.revisionSha256,policySha256:scope.policySha256,chunkId:scope.descriptor.id,chunkSha256:scope.descriptor.chunkSha256,...candidate}));
  const decision=await review({scope,bytes:source.bytes,observation:candidate,observationSha256,signal});
  if(signal?.aborted)throw Error('Review interrupted');
- return decision?.accepted===true&&decision.observationSha256===observationSha256&&decision.chunkSha256===scope.descriptor.chunkSha256;
+ if(decision?.accepted!==true||decision.observationSha256!==observationSha256||decision.chunkSha256!==scope.descriptor.chunkSha256)return null;
+ return {accepted:true,observationSha256,chunkSha256:decision.chunkSha256,reviewerId:decision.reviewerId,reviewerDefinitionSha256:decision.reviewerDefinitionSha256};
 }
