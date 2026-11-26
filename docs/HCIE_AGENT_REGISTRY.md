@@ -1,0 +1,4 @@
+# HCIE trusted agent registry
+Operator-registered analyzer and reviewer callbacks are bound to distinct agent IDs, roles, definition hashes and an approved execution-policy hash. A sealed registry derives the policy digest and resolves only approved pairs. The registered worker rejects unknown policies before claiming tasks, enforces task scope, and stamps reviewer identity from the registry instead of callback assertions.
+
+This is local trusted registration, not remote authentication, signature verification or sandbox isolation. Definition hashes are supplied by the operator from build evidence; function bodies are not independently attested. The existing low-level callback worker and coordinator remain available for trusted fixtures and are not automatically migrated. Production integration must require registered execution and independently qualified definitions. No live model calls, paid dependencies or deployment.
