@@ -18,7 +18,7 @@ async function until(fn,ms=150000){
  throw Error('Qualification deadline exceeded');
 }
 async function submit(testName){
- const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+process.env.TESTLAB_TOKEN},body:JSON.stringify({testName}),signal:AbortSignal.timeout(15000)});
+ const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+process.env.TESTLAB_TOKEN},body:JSON.stringify({testName}),signal:AbortSignal.timeout(25000)});
  assert.equal(response.status,202);return response.json();
 }
 function workload(o){

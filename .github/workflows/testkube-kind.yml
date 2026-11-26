@@ -2,7 +2,7 @@ name: Testkube real Kubernetes integration
 on:
   push:
     branches: [feat/testkube-mit-qualification]
-    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-kind-reliability.mjs']
+    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/server.js', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-submission-api.test.js', 'backend/test/testkube-kind-reliability.mjs']
   workflow_dispatch:
 permissions:
   contents: read
