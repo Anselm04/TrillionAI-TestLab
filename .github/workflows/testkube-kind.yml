@@ -228,6 +228,38 @@ jobs:
           }
           JS
           node backend/test/testkube-kind-reliability.mjs
+      - name: Scan embedded Go binaries and executor images
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/security-evidence"
+          GOBIN="$RUNNER_TEMP" go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          failed=0
+          for binary in "$RUNNER_TEMP/testkube-api" "$RUNNER_TEMP/executor-init/runner" "$RUNNER_TEMP/executor-scraper/runner"; do
+            name="$(basename "$(dirname "$binary")")-$(basename "$binary")"
+            "$RUNNER_TEMP/govulncheck" -mode=binary "$binary" > "$RUNNER_TEMP/security-evidence/$name.txt" 2>&1 || failed=1
+          done
+          docker pull aquasec/trivy:0.69.3
+          for component in init scraper; do
+            docker save "testlab-local/testkube-$component-executor:224f02d" -o "$RUNNER_TEMP/$component-image.tar"
+            docker run --rm -v "$RUNNER_TEMP:/scan" aquasec/trivy:0.69.3 image --input "/scan/$component-image.tar" --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output "/scan/security-evidence/$component-vulnerabilities.json" || failed=1
+            docker run --rm -v "$RUNNER_TEMP:/scan" aquasec/trivy:0.69.3 image --input "/scan/$component-image.tar" --format cyclonedx --output "/scan/security-evidence/$component-sbom.json" || failed=1
+          done
+          exit "$failed"
+      - name: Collect license review inventory
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/security-evidence"
+          cd third_party/testkube
+          go list -mod=readonly -m -json all > "$RUNNER_TEMP/security-evidence/go-modules.json"
+          for component in init scraper; do
+            cp "contrib/executor/$component/LICENSE" "$RUNNER_TEMP/security-evidence/$component-LICENSE"
+            grep -Fx 'MIT License' "contrib/executor/$component/LICENSE"
+          done
+          go version -m "$RUNNER_TEMP/testkube-api" > "$RUNNER_TEMP/security-evidence/api-build-modules.txt"
+          for component in init scraper; do
+            go version -m "$RUNNER_TEMP/executor-$component/runner" > "$RUNNER_TEMP/security-evidence/$component-build-modules.txt"
+          done
       - name: Collect workload diagnostics
         if: always()
         run: |
@@ -252,6 +284,7 @@ jobs:
           name: testkube-kind-evidence
           path: |
             ${{ runner.temp }}/testkube-workload-evidence.json
+            ${{ runner.temp }}/security-evidence/
             ${{ runner.temp }}/testkube-independent-evidence.json
             ${{ runner.temp }}/testkube-workloads.txt
             ${{ runner.temp }}/testkube-events.txt
