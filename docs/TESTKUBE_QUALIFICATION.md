@@ -17,4 +17,12 @@ The one filename missed by the inventory is `github.com/package-url/packageurl-g
 
 The API binary also links `github.com/hashicorp/golang-lru/v2` v2.0.1 (MPL-2.0), tag `6ce8a7443353151a95e1d2d74e0579bd4e5b92e5`. The [MPL-2.0 license](https://www.mozilla.org/en-US/MPL/2.0/) and [corresponding upstream source](https://github.com/hashicorp/golang-lru/tree/v2.0.1) are identified for the distribution review. MPL-covered source availability and license notices must be addressed if binaries are redistributed, alongside the other applicable notice obligations.
 
-Status: functional and security qualification passed for the tested build. Production release, binary redistribution and final licensing clearance remain blocked pending review of the distribution notice/source package. No production activation or general security certification is implied.
+## Distribution evidence prepared
+
+The exact run-14 artifact was downloaded and verified against its SHA-256 above. `TESTKUBE_LINKED_NOTICES.txt` contains the indexed full notice texts for all 133 module entries (132 linked dependency versions plus the main module), with a separate Go 1.27.4 notice and the recovered PURL MIT notice. The bundle is reproducible using `scripts/prepare-testkube-notices.mjs` and the run-14 `security-evidence` directory. Its SHA-256 is `82179cbcf39defe3bcf83dcadc34767c40f35493f6ef4a17e1c501ec4d97cc7d`.
+
+`TESTKUBE_IMAGE_LICENSES.tsv` records 58 installed OS package entries (29 per executor image), derived from the exact SBOMs. It identifies, among others, GPL-2.0-only BusyBox, Git and Alpine packages, LGPL alternatives in some system libraries, and MPL-2.0 CA certificates. Its SHA-256 is `954e38b13aa02482d24cff5d2ee1da150a4135b7b6947e44e9b7d0760dd861c3`.
+
+The Go notice bundle is not a complete container distribution package: operating-system corresponding sources, applicable source-delivery arrangements, and final notice placement for each distributed artifact still require verification. See [GPL-2.0 §3](https://spdx.org/licenses/GPL-2.0-only) and [MPL-2.0 §3.2](https://www.mozilla.org/en-US/MPL/2.0/). No image or binary redistribution is authorized by this record.
+
+Status: functional and security qualification passed for the tested build, and the linked-Go notice bundle and OS license inventory are complete. Final distribution licensing clearance remains blocked. The source-only integration may be considered separately from customer artifact redistribution only with the owner's explicit approval; do not interpret this record as permission to publish or activate execution in production.
