@@ -1,0 +1,176 @@
+name: Testkube real Kubernetes integration
+on:
+  push:
+    branches: [feat/testkube-mit-qualification]
+    paths: ['.github/workflows/testkube-kind.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    if: github.ref == 'refs/heads/feat/testkube-mit-qualification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KUBECONFIG: ${{ runner.temp }}/testlab-kind-config
+      TESTKUBE_NAMESPACE: testkube
+      TESTKUBE_ANALYTICS_ENABLED: 'false'
+      TESTKUBE_CLOUD_API_KEY: ''
+      TESTKUBE_POD_START_TIMEOUT: 90s
+      DISABLE_TEST_TRIGGERS: 'true'
+      DISABLE_RECONCILER: 'true'
+      APISERVER_FULLNAME: localhost
+      STORAGE_ENDPOINT: localhost:9000
+      NATS_URI: nats://localhost:4222
+      API_MONGO_DSN: mongodb://localhost:27017
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build embedded source and install pinned Kind
+        run: |
+          set -euo pipefail
+          cd third_party/testkube
+          go mod verify
+          go build -mod=readonly -o "$RUNNER_TEMP/testkube-api" ./cmd/api-server
+          GOBIN="$RUNNER_TEMP" go install sigs.k8s.io/kind@v0.27.0
+      - name: Create isolated CI cluster and matching CRDs
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/kind" create cluster --name testlab --image kindest/node:v1.32.2 --wait 180s
+          kubectl create namespace testkube
+          cd third_party/testkube
+          operator="$(go mod download -json github.com/kubeshop/testkube-operator@v1.16.0 | jq -r .Dir)"
+          test -d "$operator/config/crd/bases"
+          kubectl apply -f "$operator/config/crd/bases"
+          kubectl wait --for=condition=Established crd --all --timeout=120s
+          docker pull busybox:1.36.1
+          "$RUNNER_TEMP/kind" load docker-image busybox:1.36.1 --name testlab
+      - name: Start disposable supporting services
+        run: |
+          set -euo pipefail
+          key="$(openssl rand -hex 12)"
+          secret="$(openssl rand -hex 24)"
+          echo "::add-mask::$key"
+          echo "::add-mask::$secret"
+          echo "STORAGE_ACCESSKEYID=$key" >> "$GITHUB_ENV"
+          echo "STORAGE_SECRETACCESSKEY=$secret" >> "$GITHUB_ENV"
+          docker run -d --name testlab-mongo -p 127.0.0.1:27017:27017 mongo:6.0.20
+          docker run -d --name testlab-nats -p 127.0.0.1:4222:4222 nats:2.10.26 -js
+          docker run -d --name testlab-minio -p 127.0.0.1:9000:9000 -e MINIO_ROOT_USER="$key" -e MINIO_ROOT_PASSWORD="$secret" minio/minio:RELEASE.2025-02-07T23-21-09Z server /data
+          for i in $(seq 1 60); do
+            if docker exec testlab-mongo mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1 && curl -fsS http://127.0.0.1:9000/minio/health/live && (echo >/dev/tcp/127.0.0.1/4222); then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - name: Start embedded engine and register trusted test fixtures
+        run: |
+          set -euo pipefail
+          cd third_party/testkube
+          "$RUNNER_TEMP/testkube-api" > "$RUNNER_TEMP/testkube-api.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/testkube-api.pid"
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8088/v1/tests > /dev/null; then break; fi
+            kill -0 "$(cat "$RUNNER_TEMP/testkube-api.pid")"
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8088/v1/tests > /dev/null
+          kubectl -n testkube apply -f - <<'YAML'
+          apiVersion: executor.testkube.io/v1
+          kind: Executor
+          metadata:
+            name: testlab-smoke
+          spec:
+            image: busybox:1.36.1
+            command: ["sh"]
+            executor_type: container
+            types: ["testlab/smoke"]
+          ---
+          apiVersion: tests.testkube.io/v3
+          kind: Test
+          metadata:
+            name: testlab-pass
+          spec:
+            type: testlab/smoke
+            executionRequest:
+              args: ["-c", "exit 0"]
+              activeDeadlineSeconds: 60
+          ---
+          apiVersion: tests.testkube.io/v3
+          kind: Test
+          metadata:
+            name: testlab-fail
+          spec:
+            type: testlab/smoke
+            executionRequest:
+              args: ["-c", "exit 7"]
+              activeDeadlineSeconds: 60
+          YAML
+      - name: Execute pass and fail via authenticated TestLab backend
+        run: |
+          set -euo pipefail
+          export TESTLAB_TESTKUBE_ORIGIN=http://127.0.0.1:8088
+          export TESTLAB_TESTKUBE_TESTS=testlab-pass,testlab-fail
+          export TESTLAB_TOKEN="$(openssl rand -hex 32)"
+          echo "::add-mask::$TESTLAB_TOKEN"
+          node backend/src/server.js > "$RUNNER_TEMP/testlab-api.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/testlab-api.pid"
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8787/health && break; sleep 1; done
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {createTestkubeClient} from './backend/src/testkube-client.js';
+          import {writeFile} from 'node:fs/promises';
+          import {setTimeout as delay} from 'node:timers/promises';
+          const client=createTestkubeClient({origin:process.env.TESTLAB_TESTKUBE_ORIGIN,approvedTests:['testlab-pass','testlab-fail']});
+          const endpoint='http://127.0.0.1:8787/testkube/executions';
+          const submit=(testName,auth=true)=>fetch(endpoint,{method:'POST',headers:{'content-type':'application/json',...(auth?{authorization:'Bearer '+process.env.TESTLAB_TOKEN}:{})},body:JSON.stringify({testName}),signal:AbortSignal.timeout(15000)});
+          assert.equal((await submit('testlab-pass',false)).status,401);
+          assert.equal((await submit('unapproved')).status,400);
+          const evidence=[];
+          for(const [name,expected] of [['testlab-pass','ENGINE_REPORTED_PASS'],['testlab-fail','ENGINE_REPORTED_FAIL']]){
+            const response=await submit(name);assert.equal(response.status,202);
+            let observation=await response.json();
+            for(let i=0;i<90&&['QUEUED','RUNNING'].includes(observation.status);i++){
+              await delay(2000);observation=await client.inspect(observation);
+            }
+            evidence.push(observation);
+            await writeFile(process.env.RUNNER_TEMP+'/testkube-workload-evidence.json',JSON.stringify(evidence,null,2));
+            assert.equal(observation.status,expected);
+            assert.equal(observation.independentlyVerified,false);
+          }
+          JS
+      - name: Collect workload diagnostics
+        if: always()
+        run: |
+          kubectl -n testkube get jobs,pods -o wide > "$RUNNER_TEMP/testkube-workloads.txt" 2>&1 || true
+          kubectl -n testkube get events --sort-by=.metadata.creationTimestamp > "$RUNNER_TEMP/testkube-events.txt" 2>&1 || true
+      - name: Destroy disposable infrastructure
+        if: always()
+        run: |
+          set -euo pipefail
+          for name in testlab-api testkube-api; do
+            if test -f "$RUNNER_TEMP/$name.pid"; then kill "$(cat "$RUNNER_TEMP/$name.pid")" 2>/dev/null || true; fi
+          done
+          if test -x "$RUNNER_TEMP/kind"; then "$RUNNER_TEMP/kind" delete cluster --name testlab; fi
+          for name in testlab-mongo testlab-nats testlab-minio; do
+            if docker container inspect "$name" >/dev/null 2>&1; then docker rm -f "$name"; fi
+          done
+          if test -x "$RUNNER_TEMP/kind"; then ! "$RUNNER_TEMP/kind" get clusters | grep -qx testlab; fi
+      - name: Upload bounded CI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testkube-kind-evidence
+          path: |
+            ${{ runner.temp }}/testkube-workload-evidence.json
+            ${{ runner.temp }}/testkube-workloads.txt
+            ${{ runner.temp }}/testkube-events.txt
+          if-no-files-found: warn
+          retention-days: 7
