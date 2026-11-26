@@ -161,7 +161,15 @@ jobs:
           assert.equal((await submit('unapproved')).status,400);
           const evidence=[];
           for(const [name,expected] of [['testlab-pass','ENGINE_REPORTED_PASS'],['testlab-fail','ENGINE_REPORTED_FAIL']]){
-            const response=await submit(name);assert.equal(response.status,202);
+            const response=await submit(name);
+            if(response.status!==202){
+              const probeName='testlab-diagnostic-'+Date.now();
+              const direct=await fetch(process.env.TESTLAB_TESTKUBE_ORIGIN+'/v1/tests/'+name+'/executions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:probeName}),signal:AbortSignal.timeout(15000)});
+              const raw=await direct.text();
+              let parsed;try{parsed=JSON.parse(raw);}catch{parsed={};}
+              console.error('Direct engine contract probe:',JSON.stringify({httpStatus:direct.status,keys:Object.keys(parsed),idPresent:typeof parsed.id==='string',nameMatches:parsed.name===probeName,testNameMatches:parsed.testName===name,status:parsed.executionResult?.status}));
+            }
+            assert.equal(response.status,202);
             let observation=await response.json();
             for(let i=0;i<90&&['QUEUED','RUNNING'].includes(observation.status);i++){
               await delay(2000);observation=await client.inspect(observation);
