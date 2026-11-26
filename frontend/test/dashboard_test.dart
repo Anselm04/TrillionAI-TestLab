@@ -35,6 +35,28 @@ void main() {
       {'id': 'functional', 'label': 'Functional', 'implementationStatus': 'PARTIAL', 'runStatus': 'PASSED'}
     ]}), throwsFormatException);
   });
+  test('stored reports bind the requested ID and preserve observed failure', () {
+    const id = '00000000-0000-4000-8000-000000000001';
+    final report = <String, dynamic>{
+      'schemaVersion': 1,
+      'id': id,
+      'project': 'fixture',
+      'status': 'FAILED',
+      'observations': [{'status': 'FAILED'}],
+      'productionReady': false,
+      'sourceRevision': {'status': 'UNKNOWN'},
+      'integrity': {'algorithm': 'sha256', 'assertion': 'checksum-only-not-signed', 'digest': 'a'.padLeft(64, 'a')},
+    };
+    expect(reportPath(id), '/runs/$id');
+    final snapshot = RunReportSnapshot.parse(report, expectedId: id);
+    expect(snapshot.status, 'FAILED');
+    expect(snapshot.revisionLabel, 'Unknown (mutable workspace)');
+    expect(() => RunReportSnapshot.parse(report, expectedId: '00000000-0000-4000-8000-000000000002'), throwsFormatException);
+    expect(() => RunReportSnapshot.parse({...report, 'status': 'PASSED'}), throwsFormatException);
+    expect(() => RunReportSnapshot.parse({...report, 'productionReady': true}), throwsFormatException);
+    expect(() => RunReportSnapshot.parse({...report, 'integrity': null}), throwsFormatException);
+    expect(() => reportPath('invalid-id'), throwsFormatException);
+  });
   testWidgets('dashboard renders core controls', (tester) async {
     await tester.pumpWidget(const TestLabApp());
     expect(find.text('Phone farm'), findsOneWidget);

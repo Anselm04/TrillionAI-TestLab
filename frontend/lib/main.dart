@@ -75,6 +75,55 @@ class CapabilitySnapshot {
   int get partial => domains.where((d) => d['implementationStatus'] == 'PARTIAL').length;
 }
 
+String reportPath(String value) {
+  final id = value.trim();
+  if (!RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$').hasMatch(id)) {
+    throw const FormatException('Invalid report ID');
+  }
+  return '/runs/$id';
+}
+
+class RunReportSnapshot {
+  const RunReportSnapshot(this.data);
+  final Map<String, dynamic> data;
+  factory RunReportSnapshot.parse(Object? value, {String? expectedId}) {
+    if (value is! Map<String, dynamic> || value['schemaVersion'] != 1 ||
+        value['id'] is! String || value['project'] is! String ||
+        value['productionReady'] != false ||
+        !['PASSED', 'FAILED', 'TIMEOUT', 'INFRASTRUCTURE_ERROR', 'NOT_EXECUTED'].contains(value['status']) ||
+        value['observations'] is! List) {
+      throw const FormatException('Invalid run report');
+    }
+    final id = value['id'] as String;
+    if (reportPath(id) != '/runs/$id' || (expectedId != null && id != expectedId)) {
+      throw const FormatException('Report ID mismatch');
+    }
+    final observations = value['observations'] as List;
+    if (observations.length != 1 || observations.first is! Map<String, dynamic> ||
+        (observations.first as Map<String, dynamic>)['status'] != value['status']) {
+      throw const FormatException('Inconsistent local runner result');
+    }
+    final integrity = value['integrity'];
+    if (integrity is! Map<String, dynamic> ||
+        integrity['algorithm'] != 'sha256' ||
+        integrity['assertion'] != 'checksum-only-not-signed' ||
+        integrity['digest'] is! String ||
+        !RegExp(r'^[a-f0-9]{64}$').hasMatch(integrity['digest'] as String)) {
+      throw const FormatException('Missing report integrity metadata');
+    }
+    return RunReportSnapshot(Map<String, dynamic>.unmodifiable(value));
+  }
+  String get id => data['id'] as String;
+  String get status => data['status'] as String;
+  String get revisionLabel {
+    final revision = data['sourceRevision'];
+    if (revision is Map<String, dynamic> && revision['status'] == 'UNKNOWN') {
+      return 'Unknown (mutable workspace)';
+    }
+    return 'Not established by this local runner';
+  }
+}
+
 class TestLabHome extends StatefulWidget {
   const TestLabHome({super.key});
   @override
@@ -85,9 +134,11 @@ class _TestLabHomeState extends State<TestLabHome> {
   final endpoint = TextEditingController(text: 'http://127.0.0.1:8787');
   final token = TextEditingController();
   final project = TextEditingController(text: 'node-sample');
+  final reportId = TextEditingController();
   final client = http.Client();
   bool running = false;
   String result = 'No test runs yet';
+  RunReportSnapshot? runReport;
   String filter = 'all';
   FarmSnapshot? farm;
   DateTime? observedAt;
@@ -114,12 +165,35 @@ class _TestLabHomeState extends State<TestLabHome> {
 
   Future<void> runTests() async {
     if (running) return;
-    setState(() { running = true; result = 'Executing tests...'; });
+    setState(() { running = true; runReport = null; result = 'Executing tests...'; });
     try {
       final data = await request('/runs', body: {'project': project.text.trim()});
-      if (mounted) setState(() => result = const JsonEncoder.withIndent('  ').convert(data));
+      final snapshot = RunReportSnapshot.parse(data);
+      if (mounted) setState(() {
+        runReport = snapshot;
+        reportId.text = snapshot.id;
+        result = const JsonEncoder.withIndent('  ').convert(snapshot.data);
+      });
     } catch (_) {
       if (mounted) setState(() => result = 'Test request failed.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
+  Future<void> retrieveReport() async {
+    if (running) return;
+    final requestedId = reportId.text.trim();
+    setState(() { running = true; runReport = null; result = 'Retrieving saved report...'; });
+    try {
+      final snapshot = RunReportSnapshot.parse(
+          await request(reportPath(requestedId)), expectedId: requestedId);
+      if (mounted) setState(() {
+        runReport = snapshot;
+        result = const JsonEncoder.withIndent('  ').convert(snapshot.data);
+      });
+    } catch (_) {
+      if (mounted) setState(() => result = 'Saved report unavailable or invalid.');
     } finally {
       if (mounted) setState(() => running = false);
     }
@@ -153,7 +227,7 @@ class _TestLabHomeState extends State<TestLabHome> {
 
   @override
   void dispose() {
-    client.close(); endpoint.dispose(); token.dispose(); project.dispose();
+    client.close(); endpoint.dispose(); token.dispose(); project.dispose(); reportId.dispose();
     super.dispose();
   }
 
@@ -206,6 +280,15 @@ class _TestLabHomeState extends State<TestLabHome> {
         const Divider(height: 32),
         TextField(controller: project, enabled: !running, decoration: const InputDecoration(labelText: 'Workspace project directory')),
         FilledButton.icon(onPressed: running ? null : runTests, icon: const Icon(Icons.science), label: const Text('Run Node.js test suite')),
+        const Divider(height: 32),
+        Text('Saved test report', style: Theme.of(context).textTheme.headlineSmall),
+        TextField(controller: reportId, enabled: !running, decoration: const InputDecoration(labelText: 'Report ID')),
+        OutlinedButton.icon(onPressed: running ? null : retrieveReport, icon: const Icon(Icons.receipt_long), label: const Text('Retrieve saved report')),
+        if (runReport != null) ...[
+          Text('Observed result: ${runReport!.status}'),
+          Text('Source revision: ${runReport!.revisionLabel}'),
+          const Text('Checksum metadata is not a signature or product certification.'),
+        ],
         SelectableText(result),
         const SizedBox(height: 24),
         const Text('Inventory is observational. This dashboard does not certify readiness or deploy applications.'),
