@@ -2,6 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { executeRun } from './core.js';
+import { createTestkubeClient } from './testkube-client.js';
 import { DurableDeviceLeases } from './durable-device-leases.js';
 import { MobileJobs } from './mobile-jobs.js';
 import { createRackTransport } from './rack-transport.js';
@@ -24,7 +25,12 @@ if(jobs){
  const transport=createRackTransport({rack,jobs,hosts:JSON.parse(process.env.TESTLAB_RACK_HOSTS)});
  await transport.listen(Number(process.env.TESTLAB_RACK_PORT||8788));
 }
+const testkube = process.env.TESTLAB_TESTKUBE_ORIGIN ? createTestkubeClient({origin:process.env.TESTLAB_TESTKUBE_ORIGIN,approvedTests:(process.env.TESTLAB_TESTKUBE_TESTS||'').split(',').map(x=>x.trim()).filter(Boolean)}) : null;
 let active = false;
+// Bound admitted HTTP requests while serializing engine submission calls.
+// Kubernetes workloads can execute concurrently after submission returns.
+let testkubeAdmitted = 0;
+let testkubeSubmissionTail = Promise.resolve();
 function send(res, code, data) { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); }
 const server = http.createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') return send(res, 200, { ok: true, service: 'TrillionAI-TestLab', version: '0.1.0' });
@@ -48,6 +54,29 @@ const server = http.createServer(async (req, res) => {
   const mobileMatch=/^\/mobile-jobs\/([0-9a-f-]{36})$/.exec(req.url||'');
   if(mobileMatch&&req.method==='GET'){
     const job=jobs?.get(mobileMatch[1]);return send(res,job?200:404,job??{error:'NOT_FOUND'});
+  }
+  if (req.url === '/testkube/executions' && req.method === 'POST') {
+    if (!testkube) return send(res,503,{error:'TESTKUBE_NOT_CONFIGURED'});
+    if (testkubeAdmitted >= 2) {
+      res.setHeader('retry-after','1');
+      return send(res,429,{error:'TESTKUBE_REQUEST_BUSY'});
+    }
+    testkubeAdmitted++;
+    try {
+      const chunks=[];let size=0;
+      for await(const chunk of req){size+=chunk.length;if(size>4096)return send(res,413,{error:'Request too large'});chunks.push(chunk);}
+      const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if(!body||Object.keys(body).length!==1||typeof body.testName!=='string')return send(res,400,{error:'TEST_NAME_REQUIRED'});
+      const previous = testkubeSubmissionTail;
+      let release;
+      testkubeSubmissionTail = new Promise(resolve => { release = resolve; });
+      try {
+        await previous;
+        if (res.destroyed) return;
+        return send(res,202,await testkube.submit(body.testName));
+      } finally { release(); }
+    }catch{return send(res,400,{error:'TESTKUBE_SUBMISSION_UNCONFIRMED'});}
+    finally{testkubeAdmitted--;}
   }
   if (req.url === '/runs' && req.method === 'POST') {
     if (active) return send(res, 429, { error: 'Runner busy; concurrency is limited to one' });

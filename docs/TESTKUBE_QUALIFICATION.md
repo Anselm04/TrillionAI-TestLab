@@ -1,0 +1,51 @@
+# Testkube Kubernetes qualification record
+
+Qualification run: [45802648709](https://github.com/Anselm04/TrillionAI-TestLab/actions/runs/45802648709), commit `76723217f8ed7819367e15881a2cc97c0a1cf0ea`. Evidence artifact SHA-256: `194ecaa945cc9db0624cf66655643125ba0e5c80aee86c4695343dfca1d2a81b`.
+
+## Observed results
+
+- Go deadline and route regression tests, API and executor builds, isolated Kubernetes setup, supporting services and engine startup passed.
+- Independent workload evidence verified exit codes 0 and 7, overlapping execution, cancellation, and Kubernetes DeadlineExceeded mapped to TIMEOUT.
+- govulncheck reported zero affected vulnerabilities in each of the API, init, and scraper binaries. Its additional non-called dependency/package findings are not a claim of universal vulnerability absence.
+- Trivy reported zero HIGH or CRITICAL findings in either executor image. SBOMs were generated. Disposable infrastructure was destroyed.
+
+## Licensing inventory and distribution gate
+
+The embedded upstream v1.16.0 source retains its MIT license and executor license files. The linked-module notice inventory contains 133 module entries. A text-based inventory review identified predominantly MIT, Apache-2.0, BSD and ISC-style notices; this is an engineering inventory, not a substitute for license interpretation or a distribution audit.
+
+The one filename missed by the inventory is `github.com/package-url/packageurl-go` v0.1.0. The exact upstream tag resolves to `04e124e0cd98ac01fdf0ebb1a5799e9139a029b7`; its [mit.LICENSE](https://github.com/package-url/packageurl-go/blob/v0.1.0/mit.LICENSE) was inspected and is reproduced in `TESTKUBE_PURL_NOTICE.md`.
+
+The API binary also links `github.com/hashicorp/golang-lru/v2` v2.0.1 (MPL-2.0), tag `6ce8a7443353151a95e1d2d74e0579bd4e5b92e5`. The [MPL-2.0 license](https://www.mozilla.org/en-US/MPL/2.0/) and [corresponding upstream source](https://github.com/hashicorp/golang-lru/tree/v2.0.1) are identified for the distribution review. MPL-covered source availability and license notices must be addressed if binaries are redistributed, alongside the other applicable notice obligations.
+
+## Distribution evidence prepared
+
+The exact run-14 artifact was downloaded and verified against its SHA-256 above. `TESTKUBE_LINKED_NOTICES.txt` contains the indexed full notice texts for all 133 module entries (132 linked dependency versions plus the main module), with a separate Go 1.27.4 notice and the recovered PURL MIT notice. The bundle is reproducible using `scripts/prepare-testkube-notices.mjs` and the run-14 `security-evidence` directory. Its SHA-256 is `82179cbcf39defe3bcf83dcadc34767c40f35493f6ef4a17e1c501ec4d97cc7d`.
+
+`TESTKUBE_IMAGE_LICENSES.tsv` records 58 installed OS package entries (29 per executor image), derived from the exact SBOMs. It identifies, among others, GPL-2.0-only BusyBox, Git and Alpine packages, LGPL alternatives in some system libraries, and MPL-2.0 CA certificates. Its SHA-256 is `954e38b13aa02482d24cff5d2ee1da150a4135b7b6947e44e9b7d0760dd861c3`.
+
+The Go notice bundle is not a complete container distribution package: operating-system corresponding sources, applicable source-delivery arrangements, and final notice placement for each distributed artifact still require verification. See [GPL-2.0 §3](https://spdx.org/licenses/GPL-2.0-only) and [MPL-2.0 §3.2](https://www.mozilla.org/en-US/MPL/2.0/). No image or binary redistribution is authorized by this record.
+
+Status: functional and security qualification passed for the tested build, and the linked-Go notice bundle and OS license inventory are complete. Final distribution licensing clearance remains blocked. The source-only integration may be considered separately from customer artifact redistribution only with the owner's explicit approval; do not interpret this record as permission to publish or activate execution in production.
+
+### Corresponding-source qualification
+
+The upstream and the newer Testkube reference both retain the external Git checkout dependency. Do not remove it merely to simplify licensing. Instead, CI captures the installed APK database from each scanned image, matches every package to the SBOM, and maps it to its exact Alpine aports commit and source-package version. The collector retrieves the pinned recipes and uses Alpine abuild's checksum verification, including the official v3.22 distfiles mirror, and retains recipe archives, fetched distfiles, source identities, and SHA-256 checksums. The actual MPL Go module source is copied from the verified module cache. Missing identities, mismatches, source-fetch failures, or artifact limits fail qualification.
+
+**Observed result:** [run 45809978085](https://github.com/Anselm04/TrillionAI-TestLab/actions/runs/45809978085), commit `929605d7e19c15bd3979a7c9c7724ce482fed5a1`, passed every step, including the independent workload checks, security scans, source collection, and cleanup. The source bundle (artifact `15114296633`, 90,703,311 bytes, SHA-256 `aad24cace88ca20552b154244f5a9e97b707880f86a5231e345053c9e0117c7f`) was downloaded and its 64 listed file hashes independently verified. It contains 21 Alpine source identities covering all 58 installed package records and the exact MPL-2.0 Go module source. The source manifest and file hashes are preserved in `TESTKUBE_ALPINE_SOURCE_MANIFEST.tsv` and `TESTKUBE_SOURCE_SHA256SUMS.txt`. The run-17 diagnostic artifact (`15114416535`, SHA-256 `0a8d7d65c1a58158440176cf5b6bf5af6ff2ece526709af39006ac31ad0e5893`) independently reproduces the tracked Go notice and OS license records byte-for-byte.
+
+The source collection engineering gate passed. Before public binary or image redistribution, pair the exact released artifacts with the corresponding source and notice package at a durable authorized location; temporary CI artifacts are evidence, not a permanent source-delivery service. This record does not claim final legal clearance or authorize production activation. Per owner instruction, PR #76 remains unmerged until completion is reviewed.
+
+### Release-staging gate
+
+The qualification workflow records SHA-256 hashes of the three binaries and two image archives at scan time. `scripts/stage-testkube-release.mjs` verifies those hashes, source coverage against both APK inventories and SBOMs, the pinned MPL module identity, scan results and linked notices before staging an exact package. It binds the candidate version to the tested commit and run, copies corresponding source and notices into the staging directory, and verifies SHA-256 coverage of every staged file. The release manifest explicitly records `distributionAuthorized: false`; only its metadata and checksums are retained as CI evidence, with no release publication. Missing or modified inputs fail the gate. Durable source delivery and an authorized distribution review remain separate from this rehearsal.
+
+
+### Hosted TestLab service — clarified release scope
+
+The owner has specified a hosted-only SaaS model: customers subscribe to TestLab, submit their products for testing and receive results. The embedded Testkube engine is an internal implementation component. Customers are not supplied the engine binaries, executor images, source tree, or repository access. This scope does not authorize external redistribution, customer-hosted installs, downloadable engine packages, or transfers to third parties.
+
+For this hosted-only scope, durable **customer** source delivery is not a prerequisite solely because the service uses the identified MIT, GPL, LGPL and MPL components internally. Retain the collected notices, corresponding sources and evidence for applicable obligations; the original redistribution gate remains in force if the distribution model changes. Do not publish proprietary TestLab source or grant customer GitHub access on account of internal engine use. This clarification is not a blanket legal clearance of all code or third-party transfers.
+
+Qualification run [18](https://github.com/Anselm04/TrillionAI-TestLab/actions/runs/45814179353), on commit `04184e9bd4a9a059146cadb80ede61a5975fc8aa`, was independently checked through GitHub Actions: the smoke job and all reported steps succeeded, including authenticated workload execution, scans, licence inventory, corresponding-source collection, exact release staging and cleanup. [TestLab CI run 511](https://github.com/Anselm04/TrillionAI-TestLab/actions/runs/45814192232) also succeeded on that commit.
+
+`distributionAuthorized: false` applies to the staged redistribution package; it is not a runtime SaaS authorization flag. Keep it false. Hosted production authorization is a separate operational decision based on the actual hosted deployment and existing readiness controls, not on publication of a customer source archive. PR #76 remains draft and unmerged; no production activation is authorized by this clarification. No additional qualification run is required merely to document the unchanged distribution scope.
