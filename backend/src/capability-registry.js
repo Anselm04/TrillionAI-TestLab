@@ -15,7 +15,7 @@ export const TEST_DOMAINS = Object.freeze([
   { id: 'ai', label: 'AI tools, prompt injection and expenditure boundaries' },
   { id: 'testing-quality', label: 'Mutation testing, flaky tests and test calibration' },
   { id: 'deployment', label: 'Deployment configuration and rollback rehearsal' },
-]);
+].map(Object.freeze));
 
 // Only the implemented Node.js runner is marked executable.
 // Other domains are planned and MUST remain untested until a real adapter exists.
@@ -27,11 +27,11 @@ export const IMPLEMENTED_CHECKS = Object.freeze([
     title: 'Node.js built-in test command',
     execution: 'docker-node22',
     command: 'node --test',
-    prerequisites: ['trusted-local-source', 'docker', 'node22-image'],
+    prerequisites: Object.freeze(['trusted-local-source', 'docker', 'node22-image']),
     supportedPlatform: 'linux',
     limitation: 'Runs tests present in the submitted project; does not independently determine overall functional completeness.',
   },
-]);
+].map(Object.freeze));
 
 function requiredString(value, name) {
   if (typeof value !== 'string' || !value.trim() || value.length > 300) throw new TypeError('Invalid ' + name);
@@ -42,7 +42,7 @@ export function catalogCapabilities() {
   const implemented = new Map(IMPLEMENTED_CHECKS.map(check => [check.domain, check]));
   return TEST_DOMAINS.map(domain => ({
     ...domain,
-    availableChecks: IMPLEMENTED_CHECKS.filter(check => check.domain === domain).map(check => ({...check, prerequisites:[...check.prerequisites]})),
+    availableChecks: IMPLEMENTED_CHECKS.filter(check => check.domain === domain.id).map(check => ({...check, prerequisites:[...check.prerequisites]})),
     implementationStatus: implemented.has(domain.id) ? 'PARTIAL' : 'NOT_IMPLEMENTED',
     // Every domain remains untested until a particular customer run executes it.
     runStatus: 'NOT_EXECUTED',

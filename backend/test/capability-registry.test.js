@@ -1,14 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TEST_DOMAINS, catalogCapabilities, planRequestedChecks, summarizeExecutedChecks } from '../src/capability-registry.js';
+import { TEST_DOMAINS, IMPLEMENTED_CHECKS, catalogCapabilities, planRequestedChecks, summarizeExecutedChecks } from '../src/capability-registry.js';
 
 test('capability inventory has unique domains and only the implemented Node.js check', () => {
   const catalog = catalogCapabilities();
   assert.equal(catalog.length, TEST_DOMAINS.length);
   assert.equal(new Set(catalog.map(x=>x.id)).size, catalog.length);
   assert.equal(catalog.filter(x=>x.implementationStatus === 'PARTIAL').length, 1);
+  assert.deepEqual(catalog.find(x=>x.id === 'functional').availableChecks.map(x=>x.id),['node.builtin-test']);
+  assert.ok(catalog.filter(x=>x.id !== 'functional').every(x=>x.availableChecks.length===0));
   assert.equal(catalog.find(x=>x.id === 'security').implementationStatus, 'NOT_IMPLEMENTED');
   assert.ok(catalog.every(x=>x.runStatus === 'NOT_EXECUTED'));
+});
+
+test('capability declarations are immutable and catalog snapshots cannot change them', () => {
+  assert.ok(TEST_DOMAINS.every(Object.isFrozen));
+  assert.ok(IMPLEMENTED_CHECKS.every(check=>Object.isFrozen(check)&&Object.isFrozen(check.prerequisites)));
+  const snapshot=catalogCapabilities();
+  snapshot[0].availableChecks[0].prerequisites.push('local-only-note');
+  assert.ok(!catalogCapabilities()[0].availableChecks[0].prerequisites.includes('local-only-note'));
 });
 
 test('all requested scenarios start not executed and unknown categories cannot pass', () => {
