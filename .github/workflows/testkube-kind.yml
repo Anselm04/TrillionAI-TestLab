@@ -10,7 +10,7 @@ jobs:
   smoke:
     if: github.ref == 'refs/heads/feat/testkube-mit-qualification'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       KUBECONFIG: /tmp/testlab-kind-config
       TESTKUBE_NAMESPACE: testkube
@@ -51,6 +51,19 @@ jobs:
           test -d "$operator/config/crd/bases"
           kubectl apply -f "$operator/config/crd/bases"
           kubectl wait --for=condition=Established crd --all --timeout=120s
+      - name: Build pinned MinIO from upstream source for CI only
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/minio-source"
+          git -C "$RUNNER_TEMP/minio-source" init -q
+          git -C "$RUNNER_TEMP/minio-source" fetch --depth=1 https://github.com/minio/minio.git 703f51164d3d0c44af41b0d86075a1f61e4779e7
+          git -C "$RUNNER_TEMP/minio-source" checkout --detach FETCH_HEAD
+          cd "$RUNNER_TEMP/minio-source"
+          test "$(git rev-parse HEAD)" = 703f51164d3d0c44af41b0d86075a1f61e4779e7
+          test "$(git rev-parse HEAD^{tree})" = 0789bddefdd1d0edd296e017fadeea5e5ea69443
+          go mod download
+          go mod verify
+          go build -mod=readonly -o "$RUNNER_TEMP/minio-ci" .
       - name: Start disposable supporting services
         run: |
           set -euo pipefail
@@ -62,7 +75,9 @@ jobs:
           echo "STORAGE_SECRETACCESSKEY=$secret" >> "$GITHUB_ENV"
           docker run -d --name testlab-mongo -p 127.0.0.1:27017:27017 mongo:6.0.20
           docker run -d --name testlab-nats -p 127.0.0.1:4222:4222 nats:2.10.26 -js
-          docker run -d --name testlab-minio -p 127.0.0.1:9000:9000 -e MINIO_ROOT_USER="$key" -e MINIO_ROOT_PASSWORD="$secret" minio/minio:RELEASE.2025-02-07T23-21-09Z server /data
+          mkdir "$RUNNER_TEMP/minio-data"
+          MINIO_ROOT_USER="$key" MINIO_ROOT_PASSWORD="$secret" "$RUNNER_TEMP/minio-ci" server --address 127.0.0.1:9000 --console-address 127.0.0.1:9001 "$RUNNER_TEMP/minio-data" > "$RUNNER_TEMP/minio-ci.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/minio-ci.pid"
           for i in $(seq 1 60); do
             if docker exec testlab-mongo mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1 && curl -fsS http://127.0.0.1:9000/minio/health/live && (echo >/dev/tcp/127.0.0.1/4222); then exit 0; fi
             sleep 2
@@ -153,11 +168,11 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          for name in testlab-api testkube-api; do
+          for name in testlab-api testkube-api minio-ci; do
             if test -f "$RUNNER_TEMP/$name.pid"; then kill "$(cat "$RUNNER_TEMP/$name.pid")" 2>/dev/null || true; fi
           done
           if test -x "$RUNNER_TEMP/kind"; then "$RUNNER_TEMP/kind" delete cluster --name testlab; fi
-          for name in testlab-mongo testlab-nats testlab-minio; do
+          for name in testlab-mongo testlab-nats; do
             if docker container inspect "$name" >/dev/null 2>&1; then docker rm -f "$name"; fi
           done
           if test -x "$RUNNER_TEMP/kind"; then ! "$RUNNER_TEMP/kind" get clusters | grep -qx testlab; fi
