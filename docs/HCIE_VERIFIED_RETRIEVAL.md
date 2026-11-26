@@ -1,0 +1,4 @@
+# Verified HCIE source retrieval
+Workers retrieve a single sealed descriptor by path and ordinal, with the expected revision and manifest digest supplied by a trusted coordinator. The reader resolves only a content-addressed object, prohibits symlink following at the object, validates descriptor identity, bounds the read to 64 KiB, checks file metadata stability and verifies the exact returned bytes. Binary data is preserved.
+
+This establishes chunk-level integrity, not a fresh full-object hash or independent authentication of a compromised database. The local store and manifest database remain operator-protected. A future distributed worker must receive authenticated manifest bindings, enforce tenant isolation and record retrieval failures as incomplete analysis. No model call or customer source modification occurs here.
