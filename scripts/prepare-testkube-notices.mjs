@@ -5,8 +5,9 @@ import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const [evidenceArg, noticesArg, imageArg] = process.argv.slice(2);
+const [evidenceArg, noticesArg, imageArg, runId='45802648709', commit='76723217f8ed7819367e15881a2cc97c0a1cf0ea'] = process.argv.slice(2);
 if (!evidenceArg || !noticesArg || !imageArg) throw Error('Usage: node prepare-testkube-notices.mjs SECURITY_EVIDENCE NOTICE_OUTPUT IMAGE_OUTPUT');
+if (!/^\d+$/.test(runId) || !/^[a-f0-9]{40}$/.test(commit)) throw Error('Invalid qualification identity');
 const evidence = resolve(evidenceArg);
 const docs = fileURLToPath(new URL('../docs/', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -49,7 +50,7 @@ for (const binary of ['api', 'init', 'scraper']) {
   }
 }
 const goNotice = add(readFileSync(join(docs, 'TESTKUBE_GO_NOTICE.txt')));
-const output = ['TestLab — Testkube Go binary third-party notices', 'Qualification run 45802648709; source commit 76723217f8ed7819367e15881a2cc97c0a1cf0ea.', 'Exact module notice texts are identified by SHA-256 below. No binary redistribution approval is implied.', '', `Go toolchain go1.27.4: ${goNotice}`, ''];
+const output = ['TestLab — Testkube Go binary third-party notices', `Qualification run ${runId}; source commit ${commit}.`, 'Exact module notice texts are identified by SHA-256 below. No binary redistribution approval is implied.', '', `Go toolchain go1.27.4: ${goNotice}`, ''];
 for (const [id, notices] of [...entries].sort(([a], [b]) => a.localeCompare(b, 'en'))) {
   output.push(`${id} [${used.get(id)?.join(', ') ?? 'module graph / main source'}]`, ...notices.map(n => `  ${n}`), '');
 }
