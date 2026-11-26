@@ -2,7 +2,7 @@ name: Testkube real Kubernetes integration
 on:
   push:
     branches: [feat/testkube-mit-qualification]
-    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/server.js', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-submission-api.test.js', 'backend/test/testkube-kind-reliability.mjs']
+    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/server.js', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-submission-api.test.js', 'backend/test/testkube-kind-reliability.mjs', 'third_party/testkube/pkg/executor/containerexecutor/**']
   workflow_dispatch:
 permissions:
   contents: read
@@ -39,6 +39,7 @@ jobs:
           set -euo pipefail
           cd third_party/testkube
           go mod verify
+          go test -mod=readonly ./pkg/executor/containerexecutor -run '^TestConfirmJobDeadline$' -count=1
           go build -mod=readonly -o "$RUNNER_TEMP/testkube-api" ./cmd/api-server
           GOBIN="$RUNNER_TEMP" go install sigs.k8s.io/kind@v0.27.0
       - name: Create isolated CI cluster and matching CRDs

@@ -306,11 +306,40 @@ func (c *ContainerExecutor) updateResultsFromPod(
 	l *zap.SugaredLogger,
 	execution *testkube.Execution,
 	jobOptions *JobOptions,
-) (*testkube.ExecutionResult, error) {
+) (finalResult *testkube.ExecutionResult, finalErr error) {
 	var err error
+	failedPod := false
 
-	// save stop time and final state
-	defer c.stopExecution(ctx, execution, execution.ExecutionResult)
+	// Finalize once, after log parsing, so a confirmed deadline cannot be
+	// overwritten by a generic pod failure or a parsed runner result.
+	defer func() {
+		if finalErr != nil && !execution.ExecutionResult.IsCompleted() {
+			execution.ExecutionResult.Err(finalErr)
+		}
+		if jobOptions.ActiveDeadlineSeconds > 0 && (failedPod || finalErr != nil || execution.ExecutionResult.IsFailed()) {
+			if c.confirmJobDeadline(ctx, execution.Id, executorPod) {
+				execution.ExecutionResult.Status = testkube.ExecutionStatusTimeout
+				execution.ExecutionResult.ErrorMessage += "\nKubernetes Job deadline exceeded (DeadlineExceeded)"
+			}
+		}
+		// An already persisted cancellation must not be replaced by log collection.
+		saved, readErr := c.repository.Get(ctx, execution.Id)
+		if readErr != nil {
+			finalErr = readErr
+			return
+		}
+		if saved.ExecutionResult != nil && saved.ExecutionResult.Status != nil && saved.IsCanceled() {
+			finalResult = saved.ExecutionResult
+			return
+		}
+		finalResult = execution.ExecutionResult
+		if saveErr := c.repository.UpdateResult(ctx, execution.Id, *execution); saveErr != nil {
+			l.Errorw("Update result", "error", saveErr)
+			finalErr = saveErr
+			return
+		}
+		c.stopExecution(ctx, execution, finalResult)
+	}()
 
 	// wait for pod
 	l.Debug("poll immediate waiting for executor pod")
@@ -331,6 +360,7 @@ func (c *ContainerExecutor) updateResultsFromPod(
 	if err != nil {
 		return execution.ExecutionResult, err
 	}
+	failedPod = latestExecutorPod.Status.Phase == corev1.PodFailed
 
 	var scraperLogs []byte
 	if jobOptions.ArtifactRequest != nil &&
@@ -407,10 +437,6 @@ func (c *ContainerExecutor) updateResultsFromPod(
 	if err != nil {
 		l.Errorw("get executor pod logs error", "error", err)
 		execution.ExecutionResult.Err(err)
-		err = c.repository.UpdateResult(ctx, execution.Id, *execution)
-		if err != nil {
-			l.Infow("Update result", "error", err)
-		}
 		return execution.ExecutionResult, err
 	}
 
@@ -422,10 +448,6 @@ func (c *ContainerExecutor) updateResultsFromPod(
 		l.Errorw("parse output error", "error", err)
 		execution.ExecutionResult.Output = output
 		execution.ExecutionResult.Err(err)
-		err = c.repository.UpdateResult(ctx, execution.Id, *execution)
-		if err != nil {
-			l.Infow("Update result", "error", err)
-		}
 		return execution.ExecutionResult, err
 	}
 
@@ -443,11 +465,6 @@ func (c *ContainerExecutor) updateResultsFromPod(
 		execution.ExecutionResult.ErrorMessage = errorMessage
 	}
 
-	l.Infow("container execution completed saving result", "executionId", execution.Id, "status", execution.ExecutionResult.Status)
-	err = c.repository.UpdateResult(ctx, execution.Id, *execution)
-	if err != nil {
-		l.Errorw("Update execution result error", "error", err)
-	}
 	return execution.ExecutionResult, nil
 }
 
