@@ -51,6 +51,8 @@ func (s *HTTPServer) Init() {
 	// server generic endpoints
 	s.Mux.Get("/health", s.HealthEndpoint())
 	s.Mux.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
+	s.Mux.Get("/results/health", s.HealthEndpoint())
+	s.Mux.Get("/results/metrics", adaptor.HTTPHandler(promhttp.Handler()))
 
 	// v1 API
 	v1 := s.Mux.Group("/v1")

@@ -246,15 +246,23 @@ func (s *TestkubeAPI) InitEnvs() {
 }
 
 func (s *TestkubeAPI) InitRoutes() {
-	s.Routes.Static("/api-docs", "./api/v1")
-	s.Routes.Use(cors.New())
-	s.Routes.Use(s.AuthHandler())
+	// Register the documented legacy API prefix explicitly. Self-mounting
+	// the Fiber app is not supported by the patched router.
+	s.registerAPIRoutes(s.Routes)
+	s.registerAPIRoutes(s.Mux.Group("/results/v1"))
+	s.initProxyRoutes()
+}
 
-	s.Routes.Get("/info", s.InfoHandler())
-	s.Routes.Get("/routes", s.RoutesHandler())
-	s.Routes.Get("/debug", s.DebugHandler())
+func (s *TestkubeAPI) registerAPIRoutes(routes fiber.Router) {
+	routes.Static("/api-docs", "./api/v1")
+	routes.Use(cors.New())
+	routes.Use(s.AuthHandler())
 
-	executors := s.Routes.Group("/executors")
+	routes.Get("/info", s.InfoHandler())
+	routes.Get("/routes", s.RoutesHandler())
+	routes.Get("/debug", s.DebugHandler())
+
+	executors := routes.Group("/executors")
 
 	executors.Post("/", s.CreateExecutorHandler())
 	executors.Get("/", s.ListExecutorsHandler())
@@ -263,7 +271,7 @@ func (s *TestkubeAPI) InitRoutes() {
 	executors.Delete("/:name", s.DeleteExecutorHandler())
 	executors.Delete("/", s.DeleteExecutorsHandler())
 
-	webhooks := s.Routes.Group("/webhooks")
+	webhooks := routes.Group("/webhooks")
 
 	webhooks.Post("/", s.CreateWebhookHandler())
 	webhooks.Patch("/:name", s.UpdateWebhookHandler())
@@ -272,7 +280,7 @@ func (s *TestkubeAPI) InitRoutes() {
 	webhooks.Delete("/:name", s.DeleteWebhookHandler())
 	webhooks.Delete("/", s.DeleteWebhooksHandler())
 
-	executions := s.Routes.Group("/executions")
+	executions := routes.Group("/executions")
 
 	executions.Get("/", s.ListExecutionsHandler())
 	executions.Post("/", s.ExecuteTestsHandler())
@@ -283,7 +291,7 @@ func (s *TestkubeAPI) InitRoutes() {
 	executions.Get("/:executionID/artifacts/:filename", s.GetArtifactHandler())
 	executions.Get("/:executionID/artifact-archive", s.GetArtifactArchiveHandler())
 
-	tests := s.Routes.Group("/tests")
+	tests := routes.Group("/tests")
 
 	tests.Get("/", s.ListTestsHandler())
 	tests.Post("/", s.CreateTestHandler())
@@ -302,11 +310,11 @@ func (s *TestkubeAPI) InitRoutes() {
 	tests.Get("/:id/executions/:executionID", s.GetExecutionHandler())
 	tests.Patch("/:id/executions/:executionID", s.AbortExecutionHandler())
 
-	testWithExecutions := s.Routes.Group("/test-with-executions")
+	testWithExecutions := routes.Group("/test-with-executions")
 	testWithExecutions.Get("/", s.ListTestWithExecutionsHandler())
 	testWithExecutions.Get("/:id", s.GetTestWithExecutionHandler())
 
-	testsuites := s.Routes.Group("/test-suites")
+	testsuites := routes.Group("/test-suites")
 
 	testsuites.Post("/", s.CreateTestSuiteHandler())
 	testsuites.Patch("/:id", s.UpdateTestSuiteHandler())
@@ -326,18 +334,18 @@ func (s *TestkubeAPI) InitRoutes() {
 
 	testsuites.Get("/:id/metrics", s.TestSuiteMetricsHandler())
 
-	testSuiteExecutions := s.Routes.Group("/test-suite-executions")
+	testSuiteExecutions := routes.Group("/test-suite-executions")
 	testSuiteExecutions.Get("/", s.ListTestSuiteExecutionsHandler())
 	testSuiteExecutions.Post("/", s.ExecuteTestSuitesHandler())
 	testSuiteExecutions.Get("/:executionID", s.GetTestSuiteExecutionHandler())
 	testSuiteExecutions.Get("/:executionID/artifacts", s.ListTestSuiteArtifactsHandler())
 	testSuiteExecutions.Patch("/:executionID", s.AbortTestSuiteExecutionHandler())
 
-	testSuiteWithExecutions := s.Routes.Group("/test-suite-with-executions")
+	testSuiteWithExecutions := routes.Group("/test-suite-with-executions")
 	testSuiteWithExecutions.Get("/", s.ListTestSuiteWithExecutionsHandler())
 	testSuiteWithExecutions.Get("/:id", s.GetTestSuiteWithExecutionHandler())
 
-	testTriggers := s.Routes.Group("/triggers")
+	testTriggers := routes.Group("/triggers")
 	testTriggers.Get("/", s.ListTestTriggersHandler())
 	testTriggers.Post("/", s.CreateTestTriggerHandler())
 	testTriggers.Patch("/", s.BulkUpdateTestTriggersHandler())
@@ -346,10 +354,10 @@ func (s *TestkubeAPI) InitRoutes() {
 	testTriggers.Patch("/:id", s.UpdateTestTriggerHandler())
 	testTriggers.Delete("/:id", s.DeleteTestTriggerHandler())
 
-	keymap := s.Routes.Group("/keymap")
+	keymap := routes.Group("/keymap")
 	keymap.Get("/triggers", s.GetTestTriggerKeyMapHandler())
 
-	testsources := s.Routes.Group("/test-sources")
+	testsources := routes.Group("/test-sources")
 	testsources.Post("/", s.CreateTestSourceHandler())
 	testsources.Get("/", s.ListTestSourcesHandler())
 	testsources.Patch("/", s.ProcessTestSourceBatchHandler())
@@ -358,7 +366,7 @@ func (s *TestkubeAPI) InitRoutes() {
 	testsources.Delete("/:name", s.DeleteTestSourceHandler())
 	testsources.Delete("/", s.DeleteTestSourcesHandler())
 
-	templates := s.Routes.Group("/templates")
+	templates := routes.Group("/templates")
 
 	templates.Post("/", s.CreateTemplateHandler())
 	templates.Patch("/:name", s.UpdateTemplateHandler())
@@ -367,38 +375,36 @@ func (s *TestkubeAPI) InitRoutes() {
 	templates.Delete("/:name", s.DeleteTemplateHandler())
 	templates.Delete("/", s.DeleteTemplatesHandler())
 
-	labels := s.Routes.Group("/labels")
+	labels := routes.Group("/labels")
 	labels.Get("/", s.ListLabelsHandler())
 
-	slack := s.Routes.Group("/slack")
+	slack := routes.Group("/slack")
 	slack.Get("/", s.OauthHandler())
 
-	events := s.Routes.Group("/events")
+	events := routes.Group("/events")
 	events.Post("/flux", s.FluxEventHandler())
 	events.Get("/stream", s.EventsStreamHandler())
 
-	configs := s.Routes.Group("/config")
+	configs := routes.Group("/config")
 	configs.Get("/", s.GetConfigsHandler())
 	configs.Patch("/", s.UpdateConfigsHandler())
 
-	debug := s.Routes.Group("/debug")
+	debug := routes.Group("/debug")
 	debug.Get("/listeners", s.GetDebugListenersHandler())
 
-	files := s.Routes.Group("/uploads")
+	files := routes.Group("/uploads")
 	files.Post("/", s.UploadFiles())
 
 	if s.enableSecretsEndpoint {
-		files := s.Routes.Group("/secrets")
+		files := routes.Group("/secrets")
 		files.Get("/", s.ListSecretsHandler())
 	}
 
-	repositories := s.Routes.Group("/repositories")
+	repositories := routes.Group("/repositories")
 	repositories.Post("/", s.ValidateRepositoryHandler())
+}
 
-	// mount everything on results
-	// TODO it should be named /api/ + dashboard refactor
-	s.Mux.Mount("/results", s.Mux)
-
+func (s *TestkubeAPI) initProxyRoutes() {
 	// mount dashboard on /ui
 	dashboardURI := os.Getenv("TESTKUBE_DASHBOARD_URI")
 	if dashboardURI == "" {
