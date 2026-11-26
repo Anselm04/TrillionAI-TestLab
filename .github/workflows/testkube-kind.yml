@@ -2,7 +2,7 @@ name: Testkube real Kubernetes integration
 on:
   push:
     branches: [feat/testkube-mit-qualification]
-    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/server.js', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-submission-api.test.js', 'backend/test/testkube-kind-reliability.mjs', 'third_party/testkube/pkg/executor/containerexecutor/**']
+    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/server.js', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-submission-api.test.js', 'backend/test/testkube-kind-reliability.mjs', 'third_party/testkube/pkg/executor/containerexecutor/**', 'third_party/testkube/go.mod', 'third_party/testkube/go.sum']
   workflow_dispatch:
 permissions:
   contents: read
@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.0'
+          go-version: '1.27.4'
           cache: false
       - uses: actions/setup-node@v4
         with:
@@ -65,14 +65,14 @@ jobs:
             cp "contrib/executor/$component/LICENSE" "$context/LICENSE"
             cat > "$context/Dockerfile" <<'DOCKER'
           FROM alpine:3.22
-          RUN apk add --no-cache ca-certificates git
+          RUN apk upgrade --no-cache && apk add --no-cache ca-certificates git
           COPY runner /bin/runner
           COPY LICENSE /usr/share/licenses/testkube-executor/LICENSE
           WORKDIR /root
           ENTRYPOINT ["/bin/runner"]
           DOCKER
             image="testlab-local/testkube-$component-executor:224f02d"
-            docker build --tag "$image" "$context"
+            docker build --pull --tag "$image" "$context"
             "$RUNNER_TEMP/kind" load docker-image "$image" --name testlab
             docker image inspect "$image" --format '{{.Id}}'
           done
@@ -253,6 +253,20 @@ jobs:
           mkdir -p "$RUNNER_TEMP/security-evidence"
           cd third_party/testkube
           go list -mod=readonly -m -json all > "$RUNNER_TEMP/security-evidence/go-modules.json"
+          # Inventory notices from the exact module graph linked by the three binaries.
+          go list -mod=readonly -deps -f '{{if .Module}}{{.Module.Path}}|{{.Module.Version}}|{{.Module.Dir}}{{end}}' ./cmd/api-server ./contrib/executor/init/cmd/agent ./contrib/executor/scraper/cmd/agent | sed '/^$/d' | sort -u > "$RUNNER_TEMP/security-evidence/linked-module-dirs.txt"
+          mkdir -p "$RUNNER_TEMP/security-evidence/module-notices"
+          while IFS='|' read -r module version dir; do
+            key="$(printf '%s@%s' "$module" "$version" | sha256sum | cut -d' ' -f1)"
+            printf '%s\t%s\t%s\n' "$key" "$module" "$version" >> "$RUNNER_TEMP/security-evidence/module-notice-index.tsv"
+            mkdir -p "$RUNNER_TEMP/security-evidence/module-notices/$key"
+            if test -d "$dir"; then
+              find "$dir" -maxdepth 1 -type f \( -iname 'license*' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'copyright*' \) -exec cp {} "$RUNNER_TEMP/security-evidence/module-notices/$key/" \;
+            fi
+            if ! find "$RUNNER_TEMP/security-evidence/module-notices/$key" -maxdepth 1 -type f | grep -q .; then
+              printf '%s\t%s\n' "$module" "$version" >> "$RUNNER_TEMP/security-evidence/module-notices-missing.tsv"
+            fi
+          done < "$RUNNER_TEMP/security-evidence/linked-module-dirs.txt"
           for component in init scraper; do
             cp "contrib/executor/$component/LICENSE" "$RUNNER_TEMP/security-evidence/$component-LICENSE"
             grep -Fx 'MIT License' "contrib/executor/$component/LICENSE"
