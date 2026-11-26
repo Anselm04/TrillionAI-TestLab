@@ -20,6 +20,16 @@ try {
     await delay(100);
   }
   assert.ok(ready, 'Backend did not start');
+  assert.equal((await fetch('http://127.0.0.1:'+port+'/capabilities')).status,401);
+  const capabilityResponse=await fetch('http://127.0.0.1:'+port+'/capabilities',{headers:{Authorization:'Bearer '+token}});
+  assert.equal(capabilityResponse.status,200);
+  const catalog=await capabilityResponse.json();
+  assert.equal(catalog.scope,'DECLARED_LOCAL_RUNNER');
+  assert.equal(catalog.productionReady,false);
+  assert.equal(catalog.domains.length,14);
+  assert.ok(catalog.domains.every(d=>d.runStatus==='NOT_EXECUTED'));
+  assert.equal(catalog.domains.find(d=>d.id==='functional').availableChecks[0].id,'node.builtin-test');
+
   assert.equal((await fetch('http://127.0.0.1:'+port+'/runs',{method:'POST'})).status,401);
   const response = await fetch('http://127.0.0.1:'+port+'/runs',{
     method:'POST',

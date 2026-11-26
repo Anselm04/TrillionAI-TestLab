@@ -49,6 +49,32 @@ class FarmSnapshot {
       (d['leaseState'] ?? d['state']) == 'QUARANTINED').length;
 }
 
+class CapabilitySnapshot {
+  const CapabilitySnapshot(this.domains);
+  final List<Map<String, dynamic>> domains;
+  factory CapabilitySnapshot.parse(Object? data) {
+    if (data is! Map<String, dynamic> || data['schemaVersion'] != 1 ||
+        data['scope'] != 'DECLARED_LOCAL_RUNNER' ||
+        data['productionReady'] != false || data['domains'] is! List) {
+      throw const FormatException('Invalid capability catalog');
+    }
+    final domains = <Map<String, dynamic>>[];
+    final ids = <String>{};
+    for (final item in data['domains'] as List) {
+      if (item is! Map<String, dynamic> || item['id'] is! String ||
+          item['label'] is! String || item['runStatus'] != 'NOT_EXECUTED' ||
+          !['PARTIAL', 'NOT_IMPLEMENTED'].contains(item['implementationStatus']) ||
+          !ids.add(item['id'] as String)) {
+        throw const FormatException('Invalid capability domain');
+      }
+      domains.add(Map<String, dynamic>.unmodifiable(item));
+    }
+    if (domains.isEmpty) throw const FormatException('Empty capability catalog');
+    return CapabilitySnapshot(List<Map<String, dynamic>>.unmodifiable(domains));
+  }
+  int get partial => domains.where((d) => d['implementationStatus'] == 'PARTIAL').length;
+}
+
 class TestLabHome extends StatefulWidget {
   const TestLabHome({super.key});
   @override
@@ -66,6 +92,8 @@ class _TestLabHomeState extends State<TestLabHome> {
   FarmSnapshot? farm;
   DateTime? observedAt;
   String? farmError;
+  CapabilitySnapshot? capabilities;
+  String? capabilityError;
 
   Future<Object?> request(String path, {Map<String, String>? body}) async {
     final uri = apiUri(endpoint.text, path);
@@ -105,6 +133,19 @@ class _TestLabHomeState extends State<TestLabHome> {
       if (mounted) setState(() { farm = snapshot; observedAt = DateTime.now(); });
     } catch (_) {
       if (mounted) setState(() => farmError = 'Inventory unavailable or unauthorized.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
+  Future<void> inspectCapabilities() async {
+    if (running) return;
+    setState(() { running = true; capabilities = null; capabilityError = null; });
+    try {
+      final snapshot = CapabilitySnapshot.parse(await request('/capabilities'));
+      if (mounted) setState(() => capabilities = snapshot);
+    } catch (_) {
+      if (mounted) setState(() => capabilityError = 'Capability catalog unavailable.');
     } finally {
       if (mounted) setState(() => running = false);
     }
@@ -151,6 +192,16 @@ class _TestLabHomeState extends State<TestLabHome> {
               title: Text(device['id'] as String),
               subtitle: Text("${device['platform'] ?? 'Unknown'} · Host: ${device['host'] ?? 'local'}\nState: ${device['leaseState'] ?? device['state'] ?? 'UNKNOWN'}\nHardware: ${device['hardwareKind'] ?? 'unverified'}"),
             )),
+        ],
+        const Divider(height: 32),
+        Text('Testing capabilities', style: Theme.of(context).textTheme.headlineSmall),
+        OutlinedButton.icon(onPressed: running ? null : inspectCapabilities, icon: const Icon(Icons.refresh), label: const Text('Refresh capabilities')),
+        const Text('Declared local runner capabilities only; no customer tests have been executed by this view.'),
+        if (capabilityError != null) Text(capabilityError!),
+        if (capabilities != null) ...[
+          Text('Partial coverage domains: ${capabilities!.partial} / ${capabilities!.domains.length}'),
+          for (final domain in capabilities!.domains)
+            ListTile(title: Text(domain['label'] as String), subtitle: Text('${domain['implementationStatus']} · NOT_EXECUTED')),
         ],
         const Divider(height: 32),
         TextField(controller: project, enabled: !running, decoration: const InputDecoration(labelText: 'Workspace project directory')),
