@@ -1,0 +1,60 @@
+name: Embed Testkube MIT candidate
+on:
+  push:
+    branches: [feat/testkube-mit-qualification]
+    paths: ['.github/workflows/embed-testkube-mit.yml']
+permissions:
+  contents: read
+jobs:
+  embed:
+    if: github.ref == 'refs/heads/feat/testkube-mit-qualification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import pinned source without running upstream automation
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/kubeshop/testkube.git 45dc266f4d502b1a91e036fad1f24e569bb1d6c5
+          tree="$(git rev-parse 'FETCH_HEAD^{tree}')"
+          test "$tree" = e734070a9f0df684fa03c5b15c819d7e3f4aa725
+          test ! -e third_party/testkube
+          git read-tree --prefix=third_party/testkube/ -u "$tree"
+          test "$(git rev-parse "$(git write-tree):third_party/testkube")" = "$tree"
+          # Check for accidentally included private key material or credentials before pushing.
+          # GitHub push protection remains enabled; do not bypass it.
+          git diff --cached --name-only | awk '!/^third_party\/testkube\// {exit 1}'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Embed pinned Testkube v1.16.0 MIT candidate source'
+          git push origin HEAD:refs/heads/feat/testkube-mit-qualification
+  verify:
+    needs: embed
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/testkube-mit-qualification
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - name: Verify embedded source and compile
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:third_party/testkube)" = e734070a9f0df684fa03c5b15c819d7e3f4aa725
+          cd third_party/testkube
+          go mod download
+          go mod verify
+          go build -mod=readonly -o "$RUNNER_TEMP/testkube-api" ./cmd/api-server
+          go build -mod=readonly -o "$RUNNER_TEMP/testkube-cli" ./cmd/kubectl-testkube
+          "$RUNNER_TEMP/testkube-cli" --help
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cd backend && npm test
+      - run: TESTLAB_TOKEN=$(openssl rand -hex 32) node backend/test/e2e.mjs
