@@ -23,6 +23,9 @@ jobs:
           test ! -e third_party/testkube
           git read-tree --prefix=third_party/testkube/ -u "$tree"
           test "$(git rev-parse "$(git write-tree):third_party/testkube")" = "$tree"
+          git rm -- third_party/testkube/docs/docs/articles/slack-integration.md
+          embedded="$(git rev-parse "$(git write-tree):third_party/testkube")"
+          test "$(git diff --name-status "$tree" "$embedded")" = "$(printf 'D\tdocs/docs/articles/slack-integration.md')"
           # Check for accidentally included private key material or credentials before pushing.
           # GitHub push protection remains enabled; do not bypass it.
           git diff --cached --name-only | awk '!/^third_party\/testkube\// {exit 1}'
@@ -46,7 +49,9 @@ jobs:
       - name: Verify embedded source and compile
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD:third_party/testkube)" = e734070a9f0df684fa03c5b15c819d7e3f4aa725
+          git fetch --no-tags https://github.com/kubeshop/testkube.git 45dc266f4d502b1a91e036fad1f24e569bb1d6c5
+          test "$(git rev-parse 'FETCH_HEAD^{tree}')" = e734070a9f0df684fa03c5b15c819d7e3f4aa725
+          test "$(git diff --name-status 'FETCH_HEAD^{tree}' HEAD:third_party/testkube)" = "$(printf 'D\tdocs/docs/articles/slack-integration.md')"
           cd third_party/testkube
           go mod download
           go mod verify
