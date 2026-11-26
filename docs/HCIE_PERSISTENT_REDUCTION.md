@@ -1,0 +1,4 @@
+# Persistent HCIE reduction
+Revision- and policy-bound local SQLite storage ingests terminal map outcomes in bounded cursor batches. An independently supplied ordered task-ID digest and count are required to seal coverage. Each reduction step stores bounded child links and counts in a durable transaction, and resumes at the saved level and position. Original leaf summaries and chunk references remain reachable from the root. Incomplete leaves propagate to parent groups. No aggregate is a test verdict.
+
+The trusted coordinator must supply a complete scheduling manifest derived independently of the queue. This increment does not implement that manifest generator, distributed sharding, semantic synthesis or authenticated remote workers. It is an operator-protected local storage primitive; scale qualification remains outstanding. No live AI, paid service or deployment.
