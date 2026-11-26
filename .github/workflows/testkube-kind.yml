@@ -2,7 +2,7 @@ name: Testkube real Kubernetes integration
 on:
   push:
     branches: [feat/testkube-mit-qualification]
-    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/server.js', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-submission-api.test.js', 'backend/test/testkube-kind-reliability.mjs', 'third_party/testkube/pkg/executor/containerexecutor/**', 'third_party/testkube/internal/app/api/v1/**', 'third_party/testkube/pkg/server/**', 'third_party/testkube/go.mod', 'third_party/testkube/go.sum']
+    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/server.js', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-submission-api.test.js', 'backend/test/testkube-kind-reliability.mjs', 'backend/test/testkube-alpine-manifest.test.js', 'scripts/testkube-alpine-manifest.mjs', 'scripts/collect-testkube-alpine-sources.sh', 'third_party/testkube/pkg/executor/containerexecutor/**', 'third_party/testkube/internal/app/api/v1/**', 'third_party/testkube/pkg/server/**', 'third_party/testkube/go.mod', 'third_party/testkube/go.sum']
   workflow_dispatch:
 permissions:
   contents: read
@@ -245,6 +245,7 @@ jobs:
           docker pull aquasec/trivy:0.69.3
           for component in init scraper; do
             docker save "testlab-local/testkube-$component-executor:224f02d" -o "$RUNNER_TEMP/$component-image.tar"
+            docker run --rm --network none --entrypoint cat "testlab-local/testkube-$component-executor:224f02d" /lib/apk/db/installed > "$RUNNER_TEMP/security-evidence/$component-apk-installed.txt"
             docker run --rm -v "$RUNNER_TEMP:/scan" aquasec/trivy:0.69.3 image --input "/scan/$component-image.tar" --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output "/scan/security-evidence/$component-vulnerabilities.json" || failed=1
             docker run --rm -v "$RUNNER_TEMP:/scan" aquasec/trivy:0.69.3 image --input "/scan/$component-image.tar" --format cyclonedx --output "/scan/security-evidence/$component-sbom.json" || failed=1
           done
@@ -264,7 +265,7 @@ jobs:
             printf '%s\t%s\t%s\n' "$key" "$module" "$version" >> "$RUNNER_TEMP/security-evidence/module-notice-index.tsv"
             mkdir -p "$RUNNER_TEMP/security-evidence/module-notices/$key"
             if test -d "$dir"; then
-              find "$dir" -maxdepth 1 -type f \( -iname 'license*' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'copyright*' \) -exec cp {} "$RUNNER_TEMP/security-evidence/module-notices/$key/" \;
+              find "$dir" -maxdepth 1 -type f \( -iname 'license*' -o -iname '*.license' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'copyright*' \) -exec cp {} "$RUNNER_TEMP/security-evidence/module-notices/$key/" \;
             fi
             if ! find "$RUNNER_TEMP/security-evidence/module-notices/$key" -maxdepth 1 -type f | grep -q .; then
               printf '%s\t%s\n' "$module" "$version" >> "$RUNNER_TEMP/security-evidence/module-notices-missing.tsv"
@@ -278,6 +279,35 @@ jobs:
           for component in init scraper; do
             go version -m "$RUNNER_TEMP/executor-$component/runner" > "$RUNNER_TEMP/security-evidence/$component-build-modules.txt"
           done
+      - name: Collect exact corresponding-source candidate
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/testkube-source-bundle"
+          mkdir -p "$out/go"
+          node --test backend/test/testkube-alpine-manifest.test.js
+          node scripts/testkube-alpine-manifest.mjs "$RUNNER_TEMP/security-evidence" "$out"
+          bash scripts/collect-testkube-alpine-sources.sh "$out/apk-source-manifest.tsv" "$out"
+          cd third_party/testkube
+          go mod verify
+          go mod download -json github.com/hashicorp/golang-lru/v2@v2.0.1 > "$RUNNER_TEMP/mpl-module.json"
+          dir=$(jq -er '.Dir' "$RUNNER_TEMP/mpl-module.json")
+          test -s "$dir/LICENSE"
+          cp -a "$dir" "$out/go/golang-lru-v2.0.1"
+          jq '{Path,Version,Sum,GoModSum,Origin}' "$RUNNER_TEMP/mpl-module.json" > "$out/go/module-identity.json"
+          cd "$out"
+          test "$(du -sm . | cut -f1)" -le 300
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/testkube-source-digests.txt"
+          cp "$RUNNER_TEMP/testkube-source-digests.txt" SHA256SUMS
+          sha256sum -c SHA256SUMS >/dev/null
+      - name: Upload corresponding-source candidate evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testkube-corresponding-source-candidate
+          path: ${{ runner.temp }}/testkube-source-bundle/
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Collect workload diagnostics
         if: always()
         run: |
