@@ -36,3 +36,18 @@ test('unexecuted test is never recorded as passing', () => {
   const obs=makeObservation({checkId:'missing',command:'node --test',runnerResult:undefined,environment:'linux'});
   assert.equal(obs.status,'INFRASTRUCTURE_ERROR');
 });
+
+test('sealing rejects contradictory execution outcomes', () => {
+  const obs = makeObservation({checkId:'unit',command:'node --test',runnerResult:{exitCode:0},environment:'linux'});
+  for (const change of [
+    {timedOut:true},
+    {evidence:{...obs.evidence,executorError:'runtime error'}},
+    {status:'FAILED'},
+    {status:'FAILED',exitCode:125},
+    {status:'FAILED',exitCode:-1},
+    {status:'TIMEOUT',timedOut:false},
+    {status:'NOT_EXECUTED',exitCode:null,timedOut:true},
+  ]) {
+    assert.throws(() => sealReport({observations:[{...obs,...change}]}), /inconsistent/i);
+  }
+});

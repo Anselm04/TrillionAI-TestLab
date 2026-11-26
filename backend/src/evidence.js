@@ -47,6 +47,12 @@ export function sealReport(report) {
     if (!OBSERVATION_STATUSES.includes(obs.status)) throw new Error('Unsupported observation status');
     if (obs.status === 'PASSED' && obs.exitCode !== 0) throw new Error('Cannot pass without exit code 0');
     if (obs.status === 'NOT_EXECUTED' && obs.exitCode !== null) throw new Error('Not-executed record cannot contain an exit code');
+    if (obs.status === 'NOT_EXECUTED') {
+      if (obs.timedOut === true || obs.evidence?.executorError) throw new Error('Inconsistent execution outcome');
+    } else {
+      const expected = classifyExecution({exitCode:obs.exitCode,timedOut:obs.timedOut,error:obs.evidence?.executorError});
+      if (expected.status !== obs.status) throw new Error('Inconsistent execution outcome');
+    }
   }
   const canonical = JSON.stringify(report);
   const digest = createHash('sha256').update(canonical).digest('hex');
