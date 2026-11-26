@@ -1,0 +1,4 @@
+# Independent map observation review
+The local worker now requires a distinct trusted review callback before accepting ANALYZED. It independently retrieves the sealed bytes again, hashes the observation with task, revision, policy and chunk bindings, and requires explicit acceptance of the exact digest. Refusal, missing binding, cancellation or review failure cannot produce an accepted observation. Existing incomplete results remain incomplete.
+
+The review callback is a trusted integration contract, not proof of organizational independence or semantic correctness. A separate reviewer implementation, isolated execution, durable reviewer identity and decision evidence, and migration of pre-review queues remain outstanding. Use fresh policy-bound queues for reviewed runs; old results are not retroactively reviewed. No paid calls or deployment.
