@@ -2,7 +2,7 @@ name: Testkube real Kubernetes integration
 on:
   push:
     branches: [feat/testkube-mit-qualification]
-    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js']
+    paths: ['.github/workflows/testkube-kind.yml', 'backend/src/testkube-client.js', 'backend/test/testkube-client.test.js', 'backend/test/testkube-kind-reliability.mjs']
   workflow_dispatch:
 permissions:
   contents: read
@@ -153,7 +153,7 @@ jobs:
           spec:
             type: testlab/smoke
             executionRequest:
-              args: ["-c", "exit 0"]
+              args: ["-c", "sleep 15; exit 0"]
               activeDeadlineSeconds: 60
           ---
           apiVersion: tests.testkube.io/v3
@@ -163,14 +163,34 @@ jobs:
           spec:
             type: testlab/smoke
             executionRequest:
-              args: ["-c", "exit 7"]
+              args: ["-c", "sleep 15; exit 7"]
               activeDeadlineSeconds: 60
+          ---
+          apiVersion: tests.testkube.io/v3
+          kind: Test
+          metadata:
+            name: testlab-cancel
+          spec:
+            type: testlab/smoke
+            executionRequest:
+              args: ["-c", "sleep 180"]
+              activeDeadlineSeconds: 240
+          ---
+          apiVersion: tests.testkube.io/v3
+          kind: Test
+          metadata:
+            name: testlab-timeout
+          spec:
+            type: testlab/smoke
+            executionRequest:
+              args: ["-c", "sleep 180"]
+              activeDeadlineSeconds: 45
           YAML
       - name: Execute pass and fail via authenticated TestLab backend
         run: |
           set -euo pipefail
           export TESTLAB_TESTKUBE_ORIGIN=http://127.0.0.1:8088
-          export TESTLAB_TESTKUBE_TESTS=testlab-pass,testlab-fail
+          export TESTLAB_TESTKUBE_TESTS=testlab-pass,testlab-fail,testlab-cancel,testlab-timeout
           export TESTLAB_TOKEN="$(openssl rand -hex 32)"
           echo "::add-mask::$TESTLAB_TOKEN"
           node backend/src/server.js > "$RUNNER_TEMP/testlab-api.log" 2>&1 &
@@ -207,6 +227,7 @@ jobs:
             assert.equal(observation.independentlyVerified,false);
           }
           JS
+          node backend/test/testkube-kind-reliability.mjs
       - name: Collect workload diagnostics
         if: always()
         run: |
@@ -231,6 +252,7 @@ jobs:
           name: testkube-kind-evidence
           path: |
             ${{ runner.temp }}/testkube-workload-evidence.json
+            ${{ runner.temp }}/testkube-independent-evidence.json
             ${{ runner.temp }}/testkube-workloads.txt
             ${{ runner.temp }}/testkube-events.txt
           if-no-files-found: warn
