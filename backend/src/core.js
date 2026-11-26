@@ -57,17 +57,23 @@ export async function executeRun({ workspaceRoot, reportRoot, project, runner = 
     '--mount', 'type=bind,source=' + projectPath + ',target=/workspace,readonly',
     '--workdir', '/workspace', image, 'node', '--test'
   ];
-  const result = runner ? await runner('docker', args, { timeoutMs: 120000 }) : await runDockerLifecycle(args, { timeoutMs: 120000 });
+  let result;
+  try {
+    result = runner ? await runner('docker', args, { timeoutMs: 120000 }) : await runDockerLifecycle(args, { timeoutMs: 120000 });
+  } catch {
+    result = {exitCode:null,error:'Runner execution interrupted'};
+  }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) result = {exitCode:null,error:'Runner did not return an execution record'};
   const observation = makeObservation({ checkId: 'node-built-in-tests', command: 'node --test', runnerResult: result, environment: { image, network: 'none', readOnlyRoot: true } });
   const status = observation.status;
   const report = sealReport({
     schemaVersion: 1, id, project, profile: 'node-built-in-tests',
     sourceRevision: {status:'UNKNOWN',sha:null,reason:'Local workspace is not an immutable revision snapshot'},
     startedAt: start, finishedAt: new Date().toISOString(), status,
-    checks: [{ name: 'Node.js built-in test suite', status, exitCode: result.exitCode ?? null }],
+    checks: [{ name: 'Node.js built-in test suite', status, exitCode: observation.exitCode }],
     scope: 'Initial Node.js test runner only. NOT a production-readiness certificate.',
     execution: { image, network: 'disabled', readOnly: true, resourceLimits: true, cleanupVerified: result.cleanupVerified === true },
-    evidence: { output: result.output || '', error: result.error || null },
+    evidence: { output: observation.evidence.stdoutStderr, error: observation.evidence.executorError },
     observations: [observation],
     productionReady: false
   });

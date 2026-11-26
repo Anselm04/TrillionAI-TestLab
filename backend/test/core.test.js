@@ -44,6 +44,21 @@ test('missing Docker must never pass', async () => {
   assert.equal(report.status,'INFRASTRUCTURE_ERROR');
 });
 
+test('runner interruptions and missing records persist as infrastructure outcomes', async (t) => {
+  const root=await mkdtemp(join(tmpdir(),'testlab-interruption-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,'sample'));
+  const reportRoot=join(root,'reports');
+  for(const runner of [async()=>undefined,async()=>null,async()=>{throw new Error('fixture interruption');}]) {
+    const report=await executeRun({workspaceRoot:root,reportRoot,project:'sample',runner});
+    assert.equal(report.status,'INFRASTRUCTURE_ERROR');
+    assert.equal(report.checks[0].exitCode,null);
+    assert.equal(report.execution.cleanupVerified,false);
+    assert.equal(report.observations[0].status,'INFRASTRUCTURE_ERROR');
+    assert.deepEqual(await readStoredReport(reportRoot,report.id),report);
+  }
+});
+
 test('stored report retrieval distinguishes missing and inconsistent evidence', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'testlab-report-'));
   t.after(() => rm(root,{recursive:true,force:true}));

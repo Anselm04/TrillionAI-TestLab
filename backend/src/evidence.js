@@ -41,6 +41,9 @@ export function makeObservation({ checkId, command, runnerResult, environment })
 
 export function sealReport(report) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) throw new TypeError('Invalid report');
+  // Validate and return the same detached JSON representation that is hashed.
+  report = JSON.parse(JSON.stringify(report));
+  if (!report || typeof report !== 'object' || Array.isArray(report) || Object.hasOwn(report,'integrity')) throw new TypeError('Invalid report');
   if (!Array.isArray(report.observations) || report.observations.length === 0) throw new Error('Observations required');
   if (report.productionReady === true || report.certified === true || report.guaranteed === true) throw new Error('Unsupported certification claim');
   for (const obs of report.observations) {
@@ -54,6 +57,7 @@ export function sealReport(report) {
       if (expected.status !== obs.status) throw new Error('Inconsistent execution outcome');
     }
   }
+  if (report.observations.length === 1 && report.status !== undefined && report.status !== report.observations[0].status) throw new Error('Inconsistent report status');
   const canonical = JSON.stringify(report);
   const digest = createHash('sha256').update(canonical).digest('hex');
   return { ...report, integrity: { algorithm: 'sha256', digest, assertion: 'checksum-only-not-signed' } };
