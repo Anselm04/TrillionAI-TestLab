@@ -38,6 +38,9 @@ while IFS=$'\t' read -r origin version commit packages; do
   work=$(mktemp -d "$scratch/recipe.XXXXXXXX")
   tar -xf "$dest/recipe.tar" -C "$work" --strip-components=2
   test -s "$work/APKBUILD"
+  # The runner owns these two disposable directories. Allow the unprivileged
+  # container process to work in them without filesystem-override capabilities.
+  chmod a+rwx "$work" "$dest/distfiles"
   # Only the exact, official upstream recipe is executed, in a disposable
   # container without credentials, privileged mode, or the host Docker socket.
   docker run --rm --cap-drop ALL --security-opt no-new-privileges \
