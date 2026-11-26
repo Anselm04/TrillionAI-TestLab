@@ -29,7 +29,7 @@ export async function evaluateTraceability({plan,observations,verifyObservation}
  const canonical=createTraceabilityPlan(plan);
  if(plan.planSha256!==canonical.planSha256||!Array.isArray(observations)||observations.length>500||typeof verifyObservation!=='function')throw Error('Invalid assessment input');
  const cases=new Map(canonical.tests.map(t=>[t.id,t])),submitted=new Map(),seen=new Set();
- for(const o of observations){
+ for(const o of structuredClone(observations)){
   if(!cases.has(o?.testId)||submitted.has(o.testId)||!valid(o.evidenceId,id)||seen.has(o.evidenceId))throw Error('Unexpected or duplicate observation');
   submitted.set(o.testId,o);seen.add(o.evidenceId);
  }
