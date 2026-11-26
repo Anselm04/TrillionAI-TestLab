@@ -51,6 +51,30 @@ jobs:
           test -d "$operator/config/crd/bases"
           kubectl apply -f "$operator/config/crd/bases"
           kubectl wait --for=condition=Established crd --all --timeout=120s
+      - name: Build local matching executor images from embedded source
+        run: |
+          set -euo pipefail
+          cd third_party/testkube
+          for component in init scraper; do
+            test -s "contrib/executor/$component/LICENSE"
+            grep -Fx 'MIT License' "contrib/executor/$component/LICENSE"
+            context="$RUNNER_TEMP/executor-$component"
+            mkdir -p "$context"
+            CGO_ENABLED=0 go build -mod=readonly -trimpath -o "$context/runner" "./contrib/executor/$component/cmd/agent"
+            cp "contrib/executor/$component/LICENSE" "$context/LICENSE"
+            cat > "$context/Dockerfile" <<'DOCKER'
+          FROM alpine:3.22
+          RUN apk add --no-cache ca-certificates git
+          COPY runner /bin/runner
+          COPY LICENSE /usr/share/licenses/testkube-executor/LICENSE
+          WORKDIR /root
+          ENTRYPOINT ["/bin/runner"]
+          DOCKER
+            image="testlab-local/testkube-$component-executor:224f02d"
+            docker build --tag "$image" "$context"
+            "$RUNNER_TEMP/kind" load docker-image "$image" --name testlab
+            docker image inspect "$image" --format '{{.Id}}'
+          done
       - name: Build pinned MinIO from upstream source for CI only
         run: |
           set -euo pipefail
@@ -87,7 +111,10 @@ jobs:
         run: |
           set -euo pipefail
           cd third_party/testkube
-          export TESTKUBE_CONFIG_DIR="$PWD/config"
+          export TESTKUBE_CONFIG_DIR="$RUNNER_TEMP/testkube-config"
+          cp -a config "$TESTKUBE_CONFIG_DIR"
+          jq 'map(if .name == "init-executor" then .executor.image = "testlab-local/testkube-init-executor:224f02d" elif .name == "scraper-executor" then .executor.image = "testlab-local/testkube-scraper-executor:224f02d" else . end)' "$TESTKUBE_CONFIG_DIR/executors.json" > "$TESTKUBE_CONFIG_DIR/executors.tmp"
+          mv "$TESTKUBE_CONFIG_DIR/executors.tmp" "$TESTKUBE_CONFIG_DIR/executors.json"
           export APISERVER_PORT=8088
           export STORAGE_ENDPOINT=127.0.0.1:9000
           export NATS_URI=nats://127.0.0.1:4222
