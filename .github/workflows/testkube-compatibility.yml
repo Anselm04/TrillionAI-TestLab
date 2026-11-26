@@ -1,0 +1,64 @@
+name: Testkube embedded compatibility
+on:
+  push:
+    branches: [feat/testkube-foundation]
+    paths: ['.github/workflows/testkube-compatibility.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:third_party/testkube)" = 8942aa04d5e18a13dc8cd8a5a4f9c682af78d434
+          test -f third_party/testkube/LICENSE
+          test -f third_party/testkube/go.mod
+          test -f third_party/testkube/go.sum
+          git ls-tree -r HEAD:third_party/testkube | wc -l
+          git ls-tree -r HEAD:third_party/testkube | grep -i license
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: third_party/testkube
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Check pinned module dependencies
+        run: go mod verify
+      - name: Resolve standalone engine and CLI dependencies
+        run: go list -mod=readonly -deps ./cmd/api-server ./cmd/kubectl-testkube
+      - name: Compile engine and CLI
+        run: |
+          go build -mod=readonly -o /tmp/testkube-api ./cmd/api-server
+          go build -mod=readonly -o /tmp/testkube-cli ./cmd/kubectl-testkube
+      - name: CLI smoke test
+        run: /tmp/testkube-cli --help
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cd backend && npm test
+      - run: TESTLAB_TOKEN=$(openssl rand -hex 32) node backend/test/e2e.mjs
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.3'
+          channel: stable
+      - run: cd frontend && flutter pub get && flutter analyze && flutter test
