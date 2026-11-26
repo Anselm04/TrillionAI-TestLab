@@ -17,7 +17,7 @@ async function fixture(t){
  t.after(()=>{queue.close();chunks.close();});
  const manifest=await chunks.index({store,entry,maxChunkBytes:4,checkCapacity:async()=>true});
  queue.enqueue({chunks,path:entry.path,expectedManifestSha256:manifest.chunkManifestSha256});
- return {queue,store,chunks,entry,checkCapacity:async()=>true};
+ return {queue,store,chunks,entry,review:async({scope,observationSha256})=>({accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256}),checkCapacity:async()=>true};
 }
 test('worker obtains real verified bytes and persists analysis only',async t=>{
  const f=await fixture(t);const seen=[];
@@ -42,4 +42,21 @@ test('unavailable capacity or cancellation does not create successful analysis',
 });
 test('invalid analyzer result becomes incomplete',async t=>{
  const f=await fixture(t);assert.equal((await runMapWorkerOnce({...f,analyze:async()=>({status:'PASSED',summary:'not an analysis status'})})).status,'INCOMPLETE');
+});
+
+test('review refusal and mismatched digest never accept observation',async t=>{
+ const f=await fixture(t),analyze=async()=>({status:'ANALYZED',summary:'unverified'});
+ assert.equal((await runMapWorkerOnce({...f,analyze,review:async()=>({accepted:false})})).status,'INCOMPLETE');
+ assert.equal((await runMapWorkerOnce({...f,analyze,review:async()=>({accepted:true,observationSha256:'wrong'})})).status,'INCOMPLETE');
+});
+test('review receives independently read bytes, not analyzer-mutated buffer',async t=>{
+ const f=await fixture(t);
+ const r=await runMapWorkerOnce({...f,analyze:async({bytes})=>{bytes.fill(0);return {status:'ANALYZED',summary:'candidate'};},review:async({bytes,scope,observationSha256})=>{assert.equal(bytes.toString(),'abcd');return {accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256};}});
+ assert.equal(r.status,'ANALYZED');
+});
+test('missing or identical reviewer fails before claim',async t=>{
+ const f=await fixture(t),analyze=async()=>({status:'ANALYZED',summary:'candidate'});
+ await assert.rejects(runMapWorkerOnce({...f,analyze,review:undefined}),/configuration/);
+ await assert.rejects(runMapWorkerOnce({...f,analyze,review:analyze}),/configuration/);
+ assert.equal(f.queue.page().entries[0].state,'QUEUED');
 });

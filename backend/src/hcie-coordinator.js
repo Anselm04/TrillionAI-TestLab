@@ -28,9 +28,9 @@ export class HcieCoordinator {
  #advance(phase,cursor='',ordinal=-1){this.#db.prepare('UPDATE coordinator SET phase=?,cursor=?,ordinal=? WHERE id=1').run(phase,cursor,ordinal);}
  #finish(report){this.#db.prepare("UPDATE coordinator SET phase='DONE',report=? WHERE id=1").run(JSON.stringify(report));return report;}
  status(){const s=this.#state();return {phase:s.phase,cursor:s.cursor,ordinal:s.ordinal,report:s.report?JSON.parse(s.report):null};}
- async step({inventory,store,chunks,queue,analyze,checkCapacity,signal,leaseMs=30000}={}){
+ async step({inventory,store,chunks,queue,analyze,review,checkCapacity,signal,leaseMs=30000}={}){
   if(this.#busy)throw Error('Coordinator busy');
-  if(typeof inventory?.page!=='function'||typeof store?.root!=='function'||typeof chunks?.index!=='function'||typeof chunks?.page!=='function'||!['enqueue','page','claim','complete'].every(k=>typeof queue?.[k]==='function')||typeof analyze!=='function'||typeof checkCapacity!=='function')throw Error('Invalid coordinator dependencies');
+  if(typeof inventory?.page!=='function'||typeof store?.root!=='function'||typeof chunks?.index!=='function'||typeof chunks?.page!=='function'||!['enqueue','page','claim','complete'].every(k=>typeof queue?.[k]==='function')||typeof analyze!=='function'||typeof review!=='function'||review===analyze||typeof checkCapacity!=='function')throw Error('Invalid coordinator dependencies');
   this.#busy=true;
   try{
    const s=this.#state(),o=this.#options;
@@ -62,7 +62,7 @@ export class HcieCoordinator {
     return {status:'PROGRESS',phase:'SCHEDULE'};
    }
    if(s.phase==='ANALYZE'){
-    const r=await runMapWorkerOnce({queue,store,chunks,analyze,checkCapacity,signal,leaseMs});
+    const r=await runMapWorkerOnce({queue,store,chunks,analyze,review,checkCapacity,signal,leaseMs});
     if(r.status==='IDLE'){
      // A queue with no claimable work may still have live leases. Reduction
      // checks terminal coverage before publication.
