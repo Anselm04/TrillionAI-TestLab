@@ -17,8 +17,8 @@ export function createTestkubeClient({origin, approvedTests, timeoutMs=10000}={}
   }
   function result(value,expectedName,expectedId,executionName) {
     const status=value?.executionResult?.status;
-    if(typeof value?.id!=='string'||!idPattern.test(value.id)||value.testName!==expectedName||value.name!==executionName||(expectedId&&value.id!==expectedId)||!Object.hasOwn(statuses,status)) throw Error('Unverified execution response');
-    return {engine:'testkube-v1.16.0',executionId:value.id,testName:expectedName,executionName,status:statuses[status],engineStatus:status,observedAt:new Date().toISOString(),productionReady:false,independentlyVerified:false};
+    if(typeof value?.id!=='string'||!idPattern.test(value.id)||value.testName!==expectedName||(!Number.isSafeInteger(value.number)||value.number<1||value.name!==`${executionName}-${value.number}`)||(expectedId&&value.id!==expectedId)||!Object.hasOwn(statuses,status)) throw Error('Unverified execution response');
+    return {engine:'testkube-v1.16.0',executionId:value.id,testName:expectedName,executionName,engineExecutionName:value.name,executionNumber:value.number,status:statuses[status],engineStatus:status,observedAt:new Date().toISOString(),productionReady:false,independentlyVerified:false};
   }
   return Object.freeze({
     async submit(testName){
@@ -26,9 +26,11 @@ export function createTestkubeClient({origin, approvedTests, timeoutMs=10000}={}
       const executionName='testlab-'+randomUUID();
       return result(await request('/tests/'+testName+'/executions','POST',{name:executionName}),testName,null,executionName);
     },
-    async inspect({testName,executionId,executionName}){
+    async inspect({testName,executionId,executionName,executionNumber,engineExecutionName}){
       if(!names.has(testName)||typeof executionId!=='string'||!idPattern.test(executionId)||typeof executionName!=='string'||!/^testlab-[a-f0-9-]{36}$/.test(executionName))throw Error('Invalid execution reference');
-      return result(await request('/executions/'+executionId),testName,executionId,executionName);
+      const observed=result(await request('/executions/'+executionId),testName,executionId,executionName);
+      if(observed.executionNumber!==executionNumber||observed.engineExecutionName!==engineExecutionName)throw Error('Execution identity changed');
+      return observed;
     }
   });
 }
