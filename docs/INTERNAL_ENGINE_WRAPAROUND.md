@@ -1,0 +1,7 @@
+# Internal execution-engine wraparound
+
+The TestLab-maintained profile adapts qualified internal Testkube execution to the existing DurableExecution journal and journal coordinator. The existing engine is unchanged. The profile accepts trusted supervisor configuration only, binds fixture and revision identities, limits polling and evidence summary size, and distinguishes verified findings from engine-only claims.
+
+Independent verification is a required callback; production collectors must obtain immutable workload evidence outside the engine response and verify the artifact digest and actual workload/fixture binding. Unit fixtures are not live Kubernetes qualification. Timeout, cancellation, ambiguous submission and interrupted execution do not become customer pass/fail verdicts. The polling deadline is cooperative; the trusted transport and evidence collectors must impose hard I/O deadlines. This profile does not cancel remote workloads, automatically retry ambiguous submissions, expose an HTTP endpoint or enable production. Next: wire a real isolated workload evidence collector and supervisor with cleanup/reconciliation before registering this profile for customer workloads.
+
+Reference reviewed: Anselm04/Temporal-Source-Code-Reference README (durable workflow/retry concepts). No Temporal code or dependency imported. No changes to embedded engine, redistribution policy or customer source access.
