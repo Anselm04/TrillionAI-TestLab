@@ -1,3 +1,4 @@
+import {canonicalReviewEvidence} from './hcie-review-evidence.js';
 import {DatabaseSync} from 'node:sqlite';
 import {createHash,randomUUID} from 'node:crypto';
 const sha=/^[a-f0-9]{64}$/;
@@ -59,12 +60,14 @@ export class HcieMapQueue {
  complete({taskId,token,result}={}){
   if(!valid(taskId)||typeof token!=='string'||!result||!['ANALYZED','INCOMPLETE'].includes(result.status)||typeof result.summary!=='string'||result.summary.length>16384||!valid(result.chunkId)||!valid(result.chunkSha256)||!valid(result.policySha256))throw Error('Invalid map result');
   // Store only allowlisted fields. No engine verdict or claimed certification.
-  const body=JSON.stringify({status:result.status,summary:result.summary,chunkId:result.chunkId,chunkSha256:result.chunkSha256,policySha256:result.policySha256});
+  const candidate={status:result.status,summary:result.summary,chunkId:result.chunkId,chunkSha256:result.chunkSha256,policySha256:result.policySha256};
   return this.#tx(()=>{
    const row=this.#db.prepare("SELECT descriptor FROM map_tasks WHERE id=? AND state='LEASED' AND token=? AND until_ms>?").get(taskId,token,Date.now());
    if(!row)return false;
    const d=JSON.parse(row.descriptor);
    if(result.chunkId!==d.chunkId||result.chunkSha256!==d.chunkSha256||result.policySha256!==d.policySha256)throw Error('Result binding mismatch');
+   const reviewEvidence=result.status==='ANALYZED'?canonicalReviewEvidence({taskId,...d},candidate,result.reviewEvidence):null;
+   const body=JSON.stringify({...candidate,reviewEvidence});
    return this.#db.prepare("UPDATE map_tasks SET state=?,result=?,digest=?,token=NULL,until_ms=NULL WHERE id=? AND token=? AND until_ms>?").run(result.status,body,hash(body),taskId,token,Date.now()).changes===1;
   });
  }
@@ -73,7 +76,9 @@ export class HcieMapQueue {
   const rows=this.#db.prepare('SELECT seq,id,descriptor,state,attempt,result,digest FROM map_tasks WHERE seq>? ORDER BY seq LIMIT ?').all(after,limit+1);
   const entries=rows.slice(0,limit).map(r=>{
    if(hash(r.descriptor)!==r.id||(r.result!==null&&hash(r.result)!==r.digest)||(r.result===null&&r.digest!==null))throw Error('Stored map integrity mismatch');
-   return {cursor:r.seq,taskId:r.id,...JSON.parse(r.descriptor),state:r.state,attempt:r.attempt,result:r.result===null?null:JSON.parse(r.result)};
+   const descriptor=JSON.parse(r.descriptor),result=r.result===null?null:JSON.parse(r.result);
+   if(r.state==='ANALYZED')canonicalReviewEvidence({taskId:r.id,...descriptor},result,result?.reviewEvidence);
+   return {cursor:r.seq,taskId:r.id,...descriptor,state:r.state,attempt:r.attempt,result};
   });
   return {entries,nextCursor:entries.at(-1)?.cursor??after,hasMore:rows.length>limit,analysisComplete:false,testingComplete:false};
  }

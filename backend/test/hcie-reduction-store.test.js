@@ -1,3 +1,5 @@
+import {observationDigest} from '../src/hcie-review-evidence.js';
+const reviewed=(task,result)=>({...result,reviewEvidence:{accepted:true,reviewerId:'fixture-reviewer',reviewerDefinitionSha256:'d'.repeat(64),observationSha256:observationDigest(task,result),chunkSha256:task.chunkSha256}});
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -9,6 +11,7 @@ const hash=x=>createHash('sha256').update(x).digest('hex'),revisionSha256='a'.re
 function fixture(t,count=9){
  const dir=mkdtempSync(join(tmpdir(),'hcie-reduce-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
  const rows=Array.from({length:count},(_,i)=>{const chunkId=hash('chunk'+i),chunkSha256=hash('bytes'+i),status=i===2?'INCOMPLETE':'ANALYZED';return {cursor:i+1,taskId:hash('task'+i),revisionSha256,policySha256,chunkId,chunkSha256,manifestSha256:'c'.repeat(64),path:'src/input',index:i,state:status,result:{status,summary:'observation '+i,chunkId,chunkSha256,policySha256}};});
+ for(const row of rows)if(row.state==='ANALYZED')row.result=reviewed(row,row.result);
  const options={revisionSha256,policySha256,fanout:2,expectedCount:count,expectedTaskDigest:hash(rows.map(r=>r.taskId+'\n').join(''))};
  const queue={page:({after,limit})=>{const entries=rows.slice(after,after+limit);return {entries,nextCursor:entries.at(-1)?.cursor??after,hasMore:after+entries.length<rows.length};}};
  return {db:join(dir,'reduce.sqlite'),options,queue,rows};
@@ -20,7 +23,7 @@ test('bounded reduction persists across restarts and preserves every leaf refere
   s.seal();assert.equal(s.reduceStep({maxGroups:1}).status,'PROGRESS');s.close();s=new HcieReductionStore(f.db,f.options);
   let r;do{r=s.reduceStep({maxGroups:1});}while(r.status==='PROGRESS');
   assert.equal(r.analyzed,8);assert.equal(r.incomplete,1);
-  const found=[];function walk(id){const n=s.getNode(id);if(n.kind==='LEAF')found.push(n.taskId);else n.children.forEach(walk);}walk(r.rootId);
+  const found=[];function walk(id){const n=s.getNode(id);if(n.kind==='LEAF'){found.push(n.taskId);if(n.status==='ANALYZED')assert.equal(n.reviewEvidence.reviewerId,'fixture-reviewer');}else n.children.forEach(walk);}walk(r.rootId);
   assert.deepEqual(found,f.rows.map(x=>x.taskId));
  }finally{s.close();}
 });

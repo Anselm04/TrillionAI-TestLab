@@ -1,3 +1,4 @@
+import {canonicalReviewEvidence} from './hcie-review-evidence.js';
 import {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
 const sha=/^[a-f0-9]{64}$/;
@@ -37,7 +38,8 @@ export class HcieReductionStore {
     if(!['ANALYZED','INCOMPLETE'].includes(e.state))break;
     const r=e.result;
     if((e.state==='ANALYZED'&&!r)||(r&&(r.status!==e.state||r.chunkId!==e.chunkId||r.chunkSha256!==e.chunkSha256||r.policySha256!==this.#policy||typeof r.summary!=='string'||r.summary.length>16384)))throw Error('Assessment mismatch');
-    this.#insert(0,cursor,{kind:'LEAF',taskId:e.taskId,chunkId:e.chunkId,chunkSha256:e.chunkSha256,manifestSha256:e.manifestSha256,path:e.path,index:e.index,status:e.state,summary:r?.summary??null,analyzed:e.state==='ANALYZED'?1:0,incomplete:e.state==='INCOMPLETE'?1:0});
+    const reviewEvidence=e.state==='ANALYZED'?canonicalReviewEvidence(e,r,r.reviewEvidence):null;
+    this.#insert(0,cursor,{kind:'LEAF',taskId:e.taskId,chunkId:e.chunkId,chunkSha256:e.chunkSha256,manifestSha256:e.manifestSha256,path:e.path,index:e.index,status:e.state,summary:r?.summary??null,reviewEvidence,analyzed:e.state==='ANALYZED'?1:0,incomplete:e.state==='INCOMPLETE'?1:0});
     cursor++;
    }
    this.#db.prepare('UPDATE reduce_meta SET cursor=? WHERE id=1').run(cursor);

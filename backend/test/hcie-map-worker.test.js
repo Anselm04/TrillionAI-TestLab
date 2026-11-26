@@ -17,7 +17,7 @@ async function fixture(t){
  t.after(()=>{queue.close();chunks.close();});
  const manifest=await chunks.index({store,entry,maxChunkBytes:4,checkCapacity:async()=>true});
  queue.enqueue({chunks,path:entry.path,expectedManifestSha256:manifest.chunkManifestSha256});
- return {queue,store,chunks,entry,review:async({scope,observationSha256})=>({accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256}),checkCapacity:async()=>true};
+ return {queue,store,chunks,entry,review:async({scope,observationSha256})=>({accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256,reviewerId:'fixture-reviewer',reviewerDefinitionSha256:'d'.repeat(64)}),checkCapacity:async()=>true};
 }
 test('worker obtains real verified bytes and persists analysis only',async t=>{
  const f=await fixture(t);const seen=[];
@@ -51,7 +51,7 @@ test('review refusal and mismatched digest never accept observation',async t=>{
 });
 test('review receives independently read bytes, not analyzer-mutated buffer',async t=>{
  const f=await fixture(t);
- const r=await runMapWorkerOnce({...f,analyze:async({bytes})=>{bytes.fill(0);return {status:'ANALYZED',summary:'candidate'};},review:async({bytes,scope,observationSha256})=>{assert.equal(bytes.toString(),'abcd');return {accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256};}});
+ const r=await runMapWorkerOnce({...f,analyze:async({bytes})=>{bytes.fill(0);return {status:'ANALYZED',summary:'candidate'};},review:async({bytes,scope,observationSha256})=>{assert.equal(bytes.toString(),'abcd');return {accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256,reviewerId:'fixture-reviewer',reviewerDefinitionSha256:'d'.repeat(64)};}});
  assert.equal(r.status,'ANALYZED');
 });
 test('missing or identical reviewer fails before claim',async t=>{

@@ -22,7 +22,7 @@ async function fixture(t,data='abcdefghijkl',gap=false){
  inventory.seal({expectedFileCount:entries.length,expectedDigest:expectedInventoryDigest});
  const options={revisionSha256,policySha256,expectedFileCount:entries.length,expectedInventoryDigest,maxChunkBytes:4,fanout:2,reductionPath:join(root,'reduce.sqlite')};
  const path=join(root,'coordinator.sqlite'),seen=[];
- const deps={inventory,store,chunks,queue,review:async({scope,observationSha256})=>({accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256}),checkCapacity:async()=>true,analyze:async({bytes})=>{seen.push(bytes.toString());return {status:'ANALYZED',summary:'observed source'};}};
+ const deps={inventory,store,chunks,queue,review:async({scope,observationSha256})=>({accepted:true,observationSha256,chunkSha256:scope.descriptor.chunkSha256,reviewerId:'fixture-reviewer',reviewerDefinitionSha256:'d'.repeat(64)}),checkCapacity:async()=>true,analyze:async({bytes})=>{seen.push(bytes.toString());return {status:'ANALYZED',summary:'observed source'};}};
  return {path,options,deps,seen};
 }
 async function finish(c,deps){for(let i=0;i<100;i++){const r=await c.step(deps);if(c.status().phase==='DONE')return r;}throw Error('Coordinator did not finish');}
