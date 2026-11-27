@@ -35,3 +35,14 @@ test('existing corrupted object is not silently trusted',async t=>{
  assert.equal(await f.store.verify(object),false);await assert.rejects(f.store.capture(path),/EXISTING_OBJECT_INVALID/);
  assert.equal((await readdir(f.storage)).some(x=>x.startsWith('.capture-')),false);
 });
+
+test('directory budget bounds empty trees independently of file budget',async t=>{
+ const f=await fixture(t);
+ await mkdir(join(f.sourceRoot,'a'));
+ await mkdir(join(f.sourceRoot,'b'));
+ await mkdir(join(f.sourceRoot,'a','nested'));
+ assert.deepEqual(await entries({...f,maxFiles:1,maxDirectories:4}),[]);
+ await assert.rejects(entries({...f,maxFiles:1,maxDirectories:3}),/DIRECTORY_COUNT_LIMIT/);
+ await assert.rejects(entries({...f,maxDirectories:0}),/Invalid snapshot limits/);
+ assert.deepEqual(await entries({...f,maxDirectories:4}),[]);
+});
