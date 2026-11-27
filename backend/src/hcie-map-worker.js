@@ -11,13 +11,14 @@ export async function runMapWorkerOnce({queue,store,chunks,analyze,review,checkC
  const stop=signal?AbortSignal.any([signal,deadline]):deadline;
  const guard=()=>{if(stop.aborted||Date.now()>=task.expiresAt)throw Error('Lease or cancellation');};
  const binding={chunkId:task.chunkId,chunkSha256:task.chunkSha256,policySha256:task.policySha256};
+ const defer=()=>({taskId:task.taskId,status:typeof queue.defer==='function'?(queue.defer({taskId:task.taskId,token:task.token})?'PAUSED':'STALE'):'INTERRUPTED'});
  const finish=result=>({taskId:task.taskId,status:queue.complete({taskId:task.taskId,token:task.token,result:{...result,...binding}})?result.status:'STALE'});
  try{
   guard();
   const source=await readVerifiedChunk({store,chunks,path:task.path,index:task.index,expectedRevisionSha256:task.revisionSha256,expectedManifestSha256:task.manifestSha256,signal:stop});
   guard();
   if(source.descriptor.id!==task.chunkId||source.descriptor.chunkSha256!==task.chunkSha256)throw Error('Task source mismatch');
-  if(await checkCapacity()!==true)throw Error('Capacity unavailable');
+  if(await checkCapacity()!==true){guard();return defer();}
   guard();
   const scope=Object.freeze({taskId:task.taskId,revisionSha256:task.revisionSha256,policySha256:task.policySha256,descriptor:source.descriptor});
   const observation=await analyze({scope,bytes:source.bytes,signal:stop});
@@ -26,7 +27,7 @@ export async function runMapWorkerOnce({queue,store,chunks,analyze,review,checkC
   let evidence=null;
   const candidate=Object.freeze({status:observation.status,summary:observation.summary});
   if(candidate.status==='ANALYZED'){
-   if(await checkCapacity()!==true)throw Error('Review capacity unavailable');
+   if(await checkCapacity()!==true){guard();return defer();}
    guard();
    evidence=await reviewMapObservation({scope,observation:candidate,review,signal:stop,readAgain:()=>readVerifiedChunk({store,chunks,path:task.path,index:task.index,expectedRevisionSha256:task.revisionSha256,expectedManifestSha256:task.manifestSha256,signal:stop})});
    guard();
