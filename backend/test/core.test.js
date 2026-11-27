@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, symlink, readFile, writeFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveProject, executeRun, readStoredReport, persistReport } from '../src/core.js';
-import { verifyReportChecksum } from '../src/evidence.js';
+import { resolveProject, executeRun, readStoredReport, persistReport, MAX_REPORT_BYTES } from '../src/core.js';
+import { verifyReportChecksum, sealReport } from '../src/evidence.js';
+import { randomUUID } from 'node:crypto';
 
 test('reject traversal and invalid names', async () => {
   const root = await mkdtemp(join(tmpdir(), 'testlab-root-'));
@@ -94,4 +95,36 @@ test('report publication never replaces existing evidence and leaves no staging 
   assert.equal(attempts.find(x=>x.status==='rejected').reason.code,'EEXIST');
   assert.deepEqual(await readStoredReport(concurrent,report.id),report);
   assert.deepEqual(await readdir(concurrent),[report.id+'.json']);
+});
+
+test('local evidence storage rejects oversized reports before publication or retrieval',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'testlab-report-budget-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,'sample'));
+  const reports=join(root,'reports');
+  const report=await executeRun({workspaceRoot:root,reportRoot:reports,project:'sample',runner:async()=>({exitCode:0})});
+  const {integrity,...body}=report;
+  const large=sealReport({...body,id:randomUUID(),notes:'x'.repeat(MAX_REPORT_BYTES)});
+  await assert.rejects(persistReport(reports,large),/Report size limit/);
+  assert.equal(await readStoredReport(reports,large.id),null);
+  await writeFile(join(reports,large.id+'.json'),JSON.stringify(large));
+  await assert.rejects(readStoredReport(reports,large.id),/Report size limit/);
+  assert.deepEqual(await readStoredReport(reports,report.id),report);
+});
+
+test('bounded concurrent report publication retains all 128 independent outcomes',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'testlab-report-concurrency-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,'sample'));
+  const reports=join(root,'reports');
+  const results=[];
+  for(let i=0;i<128;i+=4){
+    const batch=await Promise.all(Array.from({length:4},(_,j)=>executeRun({workspaceRoot:root,reportRoot:reports,project:'sample',runner:async()=>({exitCode:(i+j)%2})})));
+    results.push(...batch);
+  }
+  assert.equal(new Set(results.map(r=>r.id)).size,128);
+  assert.equal((await readdir(reports)).length,128);
+  for(const report of results)assert.deepEqual(await readStoredReport(reports,report.id),report);
+  assert.equal(results.filter(r=>r.status==='PASSED').length,64);
+  assert.equal(results.filter(r=>r.status==='FAILED').length,64);
 });

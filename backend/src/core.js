@@ -1,9 +1,11 @@
-import { realpath, mkdir, readFile, open, link, unlink } from 'node:fs/promises';
+import { realpath, mkdir, open, link, unlink } from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { makeObservation, sealReport, verifyReportChecksum } from './evidence.js';
 import { runDockerLifecycle } from './docker-lifecycle.js';
+
+export const MAX_REPORT_BYTES=4*1024*1024;
 
 export async function resolveProject(root, name) {
   if (typeof name !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/.test(name) || name === '.' || name === '..') throw new Error('Project must be a single directory name');
@@ -17,9 +19,22 @@ export async function resolveProject(root, name) {
 // The stored checksum detects accidental corruption, not hostile replacement.
 export async function readStoredReport(reportRoot, id) {
   if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new Error('Invalid report ID');
-  let data;
-  try { data = await readFile(join(reportRoot,id+'.json'),'utf8'); }
+  let handle,data;
+  try { handle=await open(join(reportRoot,id+'.json'),'r'); }
   catch (err) { if (err.code === 'ENOENT') return null; throw err; }
+  try {
+    const info=await handle.stat();
+    if(!info.isFile()||!Number.isSafeInteger(info.size)||info.size>MAX_REPORT_BYTES)throw new Error('Report size limit or file type invalid');
+    const buffer=Buffer.alloc(info.size+1);
+    let offset=0;
+    while(offset<buffer.length){
+      const {bytesRead}=await handle.read(buffer,offset,buffer.length-offset,offset);
+      if(bytesRead===0)break;
+      offset+=bytesRead;
+    }
+    if(offset!==info.size)throw new Error('Report integrity check failed');
+    data=buffer.subarray(0,offset).toString('utf8');
+  } finally { await handle.close(); }
   let report;
   try { report = JSON.parse(data); }
   catch { throw new Error('Report integrity check failed'); }
@@ -34,6 +49,7 @@ export async function persistReport(reportRoot, report) {
   const id=report?.id;
   if (typeof id!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)||!verifyReportChecksum(report)) throw new Error('Report integrity check failed');
   const serialized=JSON.stringify(report,null,2);
+  if(Buffer.byteLength(serialized,'utf8')>MAX_REPORT_BYTES)throw new Error('Report size limit exceeded');
   await mkdir(reportRoot,{recursive:true});
   const staged=join(reportRoot,'.'+id+'.'+randomUUID()+'.tmp');
   const handle=await open(staged,'wx',0o600);
