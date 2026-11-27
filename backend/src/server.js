@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { executeRun, readStoredReport } from './core.js';
 import { compareRunReports } from './report-comparison.js';
 import { catalogCapabilities } from './capability-registry.js';
+import { appForgeQualificationTemplate } from './appforge-qualification.js';
 import { createTestkubeClient } from './testkube-client.js';
 import { DurableDeviceLeases } from './durable-device-leases.js';
 import { MobileJobs } from './mobile-jobs.js';
@@ -38,6 +39,9 @@ const server = http.createServer(async (req, res) => {
   if (req.headers.authorization !== 'Bearer ' + token) return send(res, 401, { error: 'Unauthorized' });
   if (req.url === '/capabilities' && req.method === 'GET') {
     return send(res,200,{schemaVersion:1,scope:'DECLARED_LOCAL_RUNNER',domains:catalogCapabilities(),productionReady:false});
+  }
+  if (req.url === '/qualification/templates/appforge' && req.method === 'GET') {
+    return send(res,200,appForgeQualificationTemplate());
   }
   if (req.url === '/device-farm' && req.method === 'GET') {
     if(rack){try{return send(res,200,{status:'RACK_SNAPSHOT',devices:rack.inventory(),productionReady:false});}catch{return send(res,503,{status:'INFRASTRUCTURE_ERROR',devices:[],productionReady:false});}}

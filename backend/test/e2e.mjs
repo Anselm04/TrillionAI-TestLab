@@ -29,6 +29,15 @@ try {
   assert.equal(catalog.domains.length,14);
   assert.ok(catalog.domains.every(d=>d.runStatus==='NOT_EXECUTED'));
   assert.equal(catalog.domains.find(d=>d.id==='functional').availableChecks[0].id,'node.builtin-test');
+  const templateUrl='http://127.0.0.1:'+port+'/qualification/templates/appforge';
+  assert.equal((await fetch(templateUrl)).status,401);
+  const templateResponse=await fetch(templateUrl,{headers:{Authorization:'Bearer '+token}});
+  assert.equal(templateResponse.status,200);
+  const template=await templateResponse.json();
+  assert.equal(template.product,'AppForge');
+  assert.equal(template.requirements.length,19);
+  assert.ok(template.requirements.every(r=>r.status==='NOT_EXECUTED'));
+  assert.equal(template.deploymentAuthorized,false);
 
   assert.equal((await fetch('http://127.0.0.1:'+port+'/runs',{method:'POST'})).status,401);
   const response = await fetch('http://127.0.0.1:'+port+'/runs',{
