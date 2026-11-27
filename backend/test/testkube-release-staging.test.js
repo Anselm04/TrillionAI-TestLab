@@ -45,6 +45,7 @@ test('stages exact artifacts and sources with a release-bound notice and no publ
   const {opts}=fixture(t); await stageRelease(opts);
   const result=JSON.parse(readFileSync(join(opts.output,'release-manifest.json')));
   assert.equal(result.distributionAuthorized,false);
+  assert.equal(result.hostedProductionAuthorized,false);
   assert.equal(result.commit,commit);
   assert.equal(result.sourceCounts.installedPackages,2);
   for(const p of artifacts) assert.equal(hash(readFileSync(join(opts.output,'artifacts',p))),result.scannedArtifacts[p]);
