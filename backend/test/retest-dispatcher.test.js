@@ -41,3 +41,16 @@ test('interrupted retest dispatch retains the input cursor for safe resumption',
  assert.equal(resumed.events[0].outcome,'PASSED');
  assert.equal(f.count(),2);
 });
+
+test('retest candidate inventory includes failures beyond recommendation display limit',async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'testlab-dispatch-candidates-'));
+ let executions=0;
+ const journal=new DurableExecution(join(dir,'runs.sqlite'),{profiles:[{id:'fixture',definitionSha256,execute:async c=>({...c,testId:'case-'+(++executions),environmentId:'local',evidenceId:c.runId,status:'FAILED'}),verify:async()=>true}]});
+ t.after(()=>{journal.close();rmSync(dir,{recursive:true,force:true});});
+ for(let i=0;i<51;i++){const q=journal.submit({profileId:'fixture',revisionSha256});await journal.runNext({checkCapacity:async()=>true,expectedRunId:q.runId});}
+ let checks=0;
+ const result=await dispatchRetestCycle({...options(journal),checkCapacity:async()=>++checks===1});
+ assert.equal(result.candidateCount,51);
+ assert.equal(result.status,'CYCLE_INCOMPLETE');
+ assert.equal(executions,51);
+});
