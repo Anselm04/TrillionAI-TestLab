@@ -18,11 +18,13 @@ export function compareRunReports(before,after) {
   const a=validate(before),b=validate(after);
   if (before.id===after.id || before.project!==after.project ||
       a.checkId!==b.checkId || a.command!==b.command) throw new Error('Incompatible reports');
-  const contextMatches=isDeepStrictEqual(a.environment,b.environment);
+  const hasContext=value=>typeof value==='string'?value.trim().length>0:!!value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length>0;
+  const contextKnown=hasContext(a.environment)&&hasContext(b.environment);
+  const contextMatches=contextKnown&&isDeepStrictEqual(a.environment,b.environment);
   const outcome=report=>({id:report.id,status:report.status,exitCode:report.observations[0].exitCode,integrityDigest:report.integrity.digest});
   return {
     schemaVersion:1,project:before.project,profile:before.profile,
-    status:!contextMatches?'CONTEXT_DIFFERS':a.status===b.status&&a.exitCode===b.exitCode?'OBSERVATIONS_MATCH':'OBSERVATIONS_DIFFER',
+    status:!contextKnown?'CONTEXT_UNKNOWN':!contextMatches?'CONTEXT_DIFFERS':a.status===b.status&&a.exitCode===b.exitCode?'OBSERVATIONS_MATCH':'OBSERVATIONS_DIFFER',
     before:outcome(before),after:outcome(after),
     revisionComparison:'NOT_ESTABLISHED',environmentEquivalenceVerified:false,
     limitations:['Observed outcomes only; neither a matching result nor a changed result proves a defect was repaired.','The local runner does not establish immutable source or environment identity.'],
