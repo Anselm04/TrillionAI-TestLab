@@ -31,7 +31,7 @@ test('reviewer rejects mismatched challenge and signs only once',async t=>{
  const worker=generateKeyPairSync('ed25519'),reviewer=generateKeyPairSync('ed25519');
  const challenge=challenges.issue(context);
  const manifest={...context,runId:'run-1',reviewChallengeId:challenge.challengeId,artifacts:[{kind:'log'},{kind:'screenshot'}]};
- const store={verify:async m=>m===manifest};
+ const store={verify:async m=>JSON.stringify(m)===JSON.stringify(manifest)};
  const attestation=await attestMobileRun({report:{...context,status:'COMMAND_SUCCEEDED',evidenceManifest:manifest},store,privateKey:worker.privateKey});
  const review=createReplayProtectedReviewer({challenges,store,workerPublicKey:worker.publicKey,reviewerPrivateKey:reviewer.privateKey});
  await assert.rejects(review({challengeId:challenges.issue(context).challengeId,manifest,attestation}));

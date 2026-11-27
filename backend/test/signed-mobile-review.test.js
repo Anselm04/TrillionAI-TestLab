@@ -6,7 +6,7 @@ const worker=generateKeyPairSync('ed25519'),reviewer=generateKeyPairSync('ed2551
 function fixture(status='COMMAND_SUCCEEDED'){
  const manifest={runId:'run-1',deviceId:'device-1',buildSha256:'a'.repeat(64),flowSha256:'b'.repeat(64),artifacts:[{kind:'log'},{kind:'screenshot'}]};
  const report={...manifest,status,evidenceManifest:manifest};
- const store={verify:async m=>m===manifest};
+ const store={verify:async m=>{assert.deepEqual(m,manifest);return true;}};
  return {manifest,report,store};
 }
 test('separate worker and reviewer signatures bind evidence to expected run',async()=>{
@@ -26,4 +26,21 @@ test('failed run cannot obtain accepted evidence decision',async()=>{
  const f=fixture('COMMAND_FAILED'),attestation=await attestMobileRun({...f,privateKey:worker.privateKey});
  const review=await reviewMobileRun({attestation,manifest:f.manifest,store:f.store,workerPublicKey:worker.publicKey,reviewerPrivateKey:reviewer.privateKey,expected:f.manifest});
  assert.equal(review.body.decision,'BLOCKED');
+});
+
+test('asynchronous verifier cannot mutate attested or reviewed evidence',async()=>{
+ const f=fixture('COMMAND_FAILED');
+ const attestation=await attestMobileRun({...f,privateKey:worker.privateKey,store:{verify:async m=>{
+  f.report.status='COMMAND_SUCCEEDED';m.deviceId='other';return true;
+ }}});
+ assert.equal(attestation.body.journeyStatus,'COMMAND_FAILED');
+ assert.equal(attestation.body.deviceId,'device-1');
+ const g=fixture();
+ g.manifest.artifacts=[{kind:'log'}];
+ const signed=await attestMobileRun({...g,privateKey:worker.privateKey});
+ const review=await reviewMobileRun({attestation:signed,manifest:g.manifest,expected:g.manifest,workerPublicKey:worker.publicKey,reviewerPrivateKey:reviewer.privateKey,store:{verify:async m=>{
+  m.artifacts.push({kind:'screenshot'});g.manifest.artifacts.push({kind:'screenshot'});return true;
+ }}});
+ assert.equal(review.body.decision,'BLOCKED');
+ assert.equal(verifyMobileReview({review,attestation:signed,reviewerPublicKey:reviewer.publicKey}),true);
 });
