@@ -100,3 +100,17 @@ test('existing inventory metadata adopts the capacity policy without rewriting s
   assert.equal(migrated.seal(manifest(2)).fileCount,2);
  }finally{migrated.close();}
 });
+
+test('inventory count stays consistent across conflicts, duplicates and concurrent handles',t=>{
+ const f=fixture(t,{maxEntries:4});
+ const second=new HcieInventoryStore(f.path,{revisionSha256});
+ try{
+  f.store.append([file(0),file(1)]);
+  assert.throws(()=>second.append([file(2),{...file(3),path:file(0).path,bytes:99}]));
+  assert.equal(second.append([file(1),file(2)]).added,1);
+  assert.throws(()=>f.store.append([file(3),file(4)]),/capacity/);
+  assert.equal(second.append([file(3)]).added,1);
+  f.reopen();
+  assert.equal(f.store.seal(manifest(4)).fileCount,4);
+ }finally{second.close();}
+});
