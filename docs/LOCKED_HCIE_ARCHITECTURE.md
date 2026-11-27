@@ -33,6 +33,8 @@ TrillionAI TestLab is strictly a software **tester and factual evidence reporter
 
 ## Acceptance milestones
 
+Inventory qualification evidence: the persistent inventory regression stores 45,000 synthetic metadata entries in batches of 200, reopens the database midway, reconciles an independently computed manifest, and confirms 45,000 indexed entries and 4,500,000 declared bytes. A separate fixture exits its writer process before orderly close, reopens the database, and verifies that committed entries are retained without duplication. Inventory sealing also reports explicit status counts, known byte totals as decimal strings, and unknown-size counts. These are local metadata-storage checks, not source-byte processing, full HCIE analysis, multi-tenant throughput or billion-line qualification.
+
 - Inventory and checkpoint a large multi-language repository with provable file and chunk accounting.
 - Recover after interruption without losing evidence or claiming the interrupted part was analysed.
 - Demonstrate reverse lookup from the final report to original immutable bytes and test observations.

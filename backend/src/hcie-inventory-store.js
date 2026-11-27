@@ -44,17 +44,25 @@ export class HcieInventoryStore{
   this.#db.exec('BEGIN IMMEDIATE');
   try{
    const hash=createHash('sha256').update(this.#revision+'\n');
-   let count=0,after='';
+   let count=0,after='',knownBytes=0n,unknownSizeCount=0;
+   const fileStatusCounts={PENDING:0,INDEXED:0,UNREADABLE:0,EXCLUDED:0,UNSUPPORTED:0};
    while(true){
     const p=this.page({after,limit:128});
-    for(const entry of p.entries){hash.update(JSON.stringify(entry)+'\n');count++;}
+    for(const entry of p.entries){
+     if(!Object.hasOwn(fileStatusCounts,entry.status))throw Error('Invalid inventory status');
+     fileStatusCounts[entry.status]++;
+     if(entry.bytes===null)unknownSizeCount++;
+     else if(Number.isSafeInteger(entry.bytes)&&entry.bytes>=0)knownBytes+=BigInt(entry.bytes);
+     else throw Error('Invalid inventory size');
+     hash.update(JSON.stringify(entry)+'\n');count++;
+    }
     after=p.nextCursor;if(!p.hasMore)break;
    }
    const digest=hash.digest('hex');
    if(count!==expectedFileCount||digest!==expectedDigest)throw Error('Inventory manifest mismatch');
    this.#db.prepare('UPDATE hcie_meta SET sealed=1,digest=? WHERE id=1').run(digest);
    this.#db.exec('COMMIT');
-   return {revisionSha256:this.#revision,fileCount:count,inventoryDigest:digest,inventorySealed:true,analysisComplete:false,testingComplete:false};
+   return {revisionSha256:this.#revision,fileCount:count,inventoryDigest:digest,inventorySealed:true,fileStatusCounts,knownBytes:knownBytes.toString(),unknownSizeCount,analysisComplete:false,testingComplete:false};
   }catch(e){this.#db.exec('ROLLBACK');throw e;}
  }
  close(){this.#db.close();}
