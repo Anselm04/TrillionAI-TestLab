@@ -39,3 +39,22 @@ test('single leaf becomes root without fabricating test completion',t=>{
  const f=fixture(t,1);const s=new HcieReductionStore(f.db,f.options);
  try{s.ingest({queue:f.queue});s.seal();const r=s.reduceStep();assert.equal(r.status,'REDUCED');assert.equal(r.testingComplete,false);assert.equal(s.getNode(r.rootId).kind,'LEAF');}finally{s.close();}
 });
+
+test('multi-group reduction matches single-group root across level boundaries',t=>{
+ const f=fixture(t,257);
+ const single=new HcieReductionStore(f.db,f.options);
+ const batch=new HcieReductionStore(f.db+'.batch',f.options);
+ try{
+  for(const s of [single,batch]){
+   while(s.ingest({queue:f.queue,limit:128}).status!=='READY_TO_SEAL'){}
+   s.seal();
+  }
+  let a,b;
+  do{a=single.reduceStep({maxGroups:1});}while(a.status==='PROGRESS');
+  do{b=batch.reduceStep({maxGroups:32});}while(b.status==='PROGRESS');
+  assert.equal(a.rootId,b.rootId);
+  assert.equal(b.analyzed,256);
+  assert.equal(b.incomplete,1);
+  assert.deepEqual(single.getNode(a.rootId),batch.getNode(b.rootId));
+ }finally{single.close();batch.close();}
+});
