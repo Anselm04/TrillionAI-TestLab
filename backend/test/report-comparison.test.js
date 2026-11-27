@@ -27,3 +27,20 @@ test('comparison refuses mismatched projects, reused reports and corrupted recor
   assert.throws(()=>compareRunReports(before,{...fixture('run-b',0),status:'FAILED'}), /Report integrity/);
   assert.equal(compareRunReports(before,fixture('run-b',0,'sample','node:24')).status,'CONTEXT_DIFFERS');
 });
+
+test('missing or empty environment declarations never establish comparable outcomes',()=>{
+ const before=fixture('run-a',0);
+ function withoutContext(id,environment){
+  const {integrity,...payload}=fixture(id,0);
+  payload.observations[0].environment=environment;
+  return sealReport(payload);
+ }
+ for(const environment of [undefined,null,'',{},[]]){
+  const after=withoutContext('run-b',environment);
+  assert.equal(compareRunReports(before,after).status,'CONTEXT_UNKNOWN');
+  const result=compareRunReports(withoutContext('run-a',environment),after);
+  assert.equal(result.status,'CONTEXT_UNKNOWN');
+  assert.equal(result.environmentEquivalenceVerified,false);
+  assert.equal(result.productionReady,false);
+ }
+});
