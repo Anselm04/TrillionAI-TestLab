@@ -41,3 +41,17 @@ test('interrupted retest dispatch retains the input cursor for safe resumption',
  assert.equal(resumed.events[0].outcome,'PASSED');
  assert.equal(f.count(),2);
 });
+
+test('bounded retest cycles advance past already processed candidates',async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'testlab-dispatch-budget-'));
+ let executions=0;
+ const journal=new DurableExecution(join(dir,'runs.sqlite'),{profiles:[{id:'fixture',definitionSha256,execute:async c=>({...c,testId:'login',environmentId:'local',evidenceId:c.runId,status:++executions<=2?'FAILED':'PASSED'}),verify:async()=>true}]});
+ t.after(()=>{journal.close();rmSync(dir,{recursive:true,force:true});});
+ for(let i=0;i<2;i++){const q=journal.submit({profileId:'fixture',revisionSha256});await journal.runNext({checkCapacity:async()=>true,expectedRunId:q.runId});}
+ const first=await dispatchRetestCycle({...options(journal),maxDispatch:1});
+ assert.equal(first.status,'CYCLE_INCOMPLETE');
+ assert.equal(executions,3);
+ const second=await dispatchRetestCycle({...options(journal),maxDispatch:1,after:first.nextCursor});
+ assert.equal(executions,4);
+ assert.equal(second.events.filter(e=>e.outcome==='PASSED').length,1);
+});
