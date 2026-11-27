@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {persistReport} from '../src/core.js';
+import {makeObservation,sealReport} from '../src/evidence.js';
+import {verifyLocalReport} from '../../scripts/verify-local-report.mjs';
+
+test('independent retained digest verifies one stored report without treating it as certification',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'testlab-digest-review-'));
+ t.after(()=>rm(root,{recursive:true,force:true}));
+ const observation=makeObservation({checkId:'node-built-in-tests',command:'node --test',runnerResult:{exitCode:1},environment:'fixture'});
+ const report=sealReport({schemaVersion:1,id:randomUUID(),project:'fixture',status:'FAILED',observations:[observation],productionReady:false});
+ const expectedDigest=report.integrity.digest;
+ await persistReport(root,report);
+ const result=await verifyLocalReport({reportRoot:root,id:report.id,expectedDigest});
+ assert.equal(result.status,'MATCHED_RETAINED_DIGEST');
+ assert.equal(result.observedStatus,'FAILED');
+ assert.equal(result.productionReady,false);
+ assert.equal(result.originVerified,false);
+ assert.equal((await verifyLocalReport({reportRoot:root,id:report.id,expectedDigest:'0'.repeat(64)})).status,'DIGEST_MISMATCH');
+ assert.equal((await verifyLocalReport({reportRoot:root,id:randomUUID(),expectedDigest})).status,'REPORT_MISSING');
+ assert.equal((await verifyLocalReport({reportRoot:root,id:report.id,expectedDigest:'unknown'})).status,'INVALID_INPUT');
+ const cli=spawnSync(process.execPath,[fileURLToPath(new URL('../../scripts/verify-local-report.mjs',import.meta.url)),root,report.id,expectedDigest],{encoding:'utf8',timeout:10000});
+ assert.equal(cli.status,0,cli.stderr);
+ assert.deepEqual(JSON.parse(cli.stdout),result);
+ const mismatch=spawnSync(process.execPath,[fileURLToPath(new URL('../../scripts/verify-local-report.mjs',import.meta.url)),root,report.id,'0'.repeat(64)],{encoding:'utf8',timeout:10000});
+ assert.equal(mismatch.status,1);
+ await writeFile(join(root,report.id+'.json'),'{');
+ assert.equal((await verifyLocalReport({reportRoot:root,id:report.id,expectedDigest})).status,'REPORT_UNAVAILABLE');
+});
