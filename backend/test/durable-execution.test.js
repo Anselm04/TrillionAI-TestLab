@@ -33,3 +33,14 @@ test('changed profile definition blocks queued execution after restart',async t=
  d=new DurableExecution(path,{profiles:[{...profile,definitionSha256:'c'.repeat(64)}]});
  try{assert.equal((await d.runNext({checkCapacity:async()=>true})).state,'BLOCKED');}finally{d.close();}
 });
+
+test('mismatched or missing observation profile identity cannot be verified',async t=>{
+ for(const profileId of ['different-profile',undefined]){
+  const d=new DurableExecution(fixture(t),{profiles:[{...profile,execute:async c=>({...c,profileId,status:'PASSED',evidenceId:'e1'}),verify:async()=>assert.fail('mismatched profile reached verifier')}]});
+  try{
+   const run=submit(d);
+   assert.equal((await d.runNext({checkCapacity:async()=>true})).state,'BLOCKED');
+   assert.equal(d.get(run.runId).result.observation,undefined);
+  }finally{d.close();}
+ }
+});
