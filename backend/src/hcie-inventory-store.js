@@ -21,6 +21,10 @@ export class HcieInventoryStore{
    this.#maxEntries=this.#db.prepare('SELECT max_entries FROM hcie_inventory_limits WHERE id=1').get().max_entries;
    if(!Number.isSafeInteger(this.#maxEntries)||this.#maxEntries<1||this.#maxEntries>hardEntryLimit||(maxEntries!==undefined&&maxEntries!==this.#maxEntries))throw Error('Inventory capacity policy mismatch');
    if(this.#db.prepare('SELECT COUNT(*) AS count FROM hcie_files').get().count>this.#maxEntries)throw Error('Inventory capacity reached');
+   this.#db.exec('CREATE TABLE IF NOT EXISTS hcie_inventory_count(id INTEGER PRIMARY KEY CHECK(id=1),entries INTEGER NOT NULL CHECK(entries>=0));');
+   const actual=this.#db.prepare('SELECT COUNT(*) AS count FROM hcie_files').get().count;
+   this.#db.prepare('INSERT OR IGNORE INTO hcie_inventory_count(id,entries) VALUES(1,?)').run(actual);
+   if(this.#db.prepare('SELECT entries FROM hcie_inventory_count WHERE id=1').get().entries!==actual)throw Error('Inventory count mismatch');
    this.#db.exec('COMMIT');
   }catch(e){this.#db.close();throw e;}
  }
@@ -31,7 +35,7 @@ export class HcieInventoryStore{
   try{
    if(this.#db.prepare('SELECT sealed FROM hcie_meta WHERE id=1').get().sealed)throw Error('Inventory sealed');
    const get=this.#db.prepare('SELECT entry FROM hcie_files WHERE path=?'),insert=this.#db.prepare('INSERT INTO hcie_files(path,entry) VALUES(?,?)');
-   const existing=this.#db.prepare('SELECT COUNT(*) AS count FROM hcie_files').get().count;
+   const existing=this.#db.prepare('SELECT entries FROM hcie_inventory_count WHERE id=1').get().entries;
    let added=0;
    for(const f of canonical){
     if(f.path.includes('\\')||f.path.includes('\0')||f.path.split('/').some(x=>!x)||!(f.reason===null||typeof f.reason==='string'&&f.reason.length<=1024))throw Error('Invalid source entry');
@@ -40,6 +44,7 @@ export class HcieInventoryStore{
     if(existing+added>=this.#maxEntries)throw Error('Inventory capacity reached');
     insert.run(f.path,encoded);added++;
    }
+   this.#db.prepare('UPDATE hcie_inventory_count SET entries=entries+? WHERE id=1').run(added);
    this.#db.exec('COMMIT');return {added};
   }catch(e){this.#db.exec('ROLLBACK');throw e;}
  }
