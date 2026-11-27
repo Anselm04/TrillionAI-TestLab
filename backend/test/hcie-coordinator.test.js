@@ -43,3 +43,30 @@ test('capacity pause and mismatched policy do not advance state',async t=>{
  const f=await fixture(t),c=new HcieCoordinator(f.path,f.options);
  try{assert.equal((await c.step({...f.deps,checkCapacity:async()=>false})).status,'PAUSED');assert.equal(c.status().phase,'INDEX');assert.throws(()=>new HcieCoordinator(f.path,{...f.options,maxChunkBytes:5}),/policy mismatch/);}finally{c.close();}
 });
+
+test('coordinator reopens after every durable step and preserves rejected review as incomplete',async t=>{
+ const f=await fixture(t,'abcdefghijkl');
+ const reviewed=[];
+ const deps={...f.deps,review:async({scope,observationSha256})=>{
+  reviewed.push(scope.descriptor.index);
+  return {accepted:scope.descriptor.index!==1,observationSha256,chunkSha256:scope.descriptor.chunkSha256,reviewerId:'fixture-reviewer',reviewerDefinitionSha256:'d'.repeat(64)};
+ }};
+ let result;
+ for(let i=0;i<100;i++){
+  const c=new HcieCoordinator(f.path,f.options);
+  try{
+   const r=await c.step(deps);
+   if(c.status().phase==='DONE'){result=r;break;}
+  }finally{c.close();}
+ }
+ assert.ok(result,'Coordinator did not finish after repeated reopen');
+ assert.equal(result.status,'REDUCED');
+ assert.equal(result.analyzed,2);
+ assert.equal(result.incomplete,1);
+ assert.equal(result.analysisComplete,false);
+ assert.equal(result.testingComplete,false);
+ assert.deepEqual(reviewed,[0,1,2]);
+ assert.deepEqual(f.seen,['abcd','efgh','ijkl']);
+ const c=new HcieCoordinator(f.path,f.options);
+ try{assert.deepEqual(await c.step(deps),result);}finally{c.close();}
+});
