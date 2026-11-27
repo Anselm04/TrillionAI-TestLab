@@ -26,7 +26,7 @@ test('real files and explicit unsupported paths seal against independent manifes
 test('interrupted batches resume without duplicate inventory entries',async t=>{
  const f=await fixture(t);await writeFile(join(f.sourceRoot,'a'),'hello');await writeFile(join(f.sourceRoot,'b'),'world');
  const expectedManifest=manifest([record('a','hello'),record('b','world')]);let checks=0;
- const first=await ingestSourceInventory({...f,expectedManifest,checkCapacity:async()=>++checks<=2});
+ const first=await ingestSourceInventory({...f,expectedManifest,checkCapacity:async()=>++checks<=4});
  assert.equal(first.status,'PAUSED');assert.equal(f.inventory.page().entries.length,1);
  const r=await ingestSourceInventory({...f,expectedManifest});assert.equal(r.status,'INVENTORY_SEALED');assert.equal(r.added,1);
 });
@@ -34,4 +34,13 @@ test('incorrect independent manifest cannot seal the inventory',async t=>{
  const f=await fixture(t);await writeFile(join(f.sourceRoot,'a'),'hello');
  const r=await ingestSourceInventory({...f,expectedManifest:manifest([record('a','wrong')])});assert.equal(r.status,'INCOMPLETE');
  assert.equal(f.inventory.append([record('b','new')]).added,1);
+});
+
+test('capacity refusal during source capture pauses ingestion without sealing',async t=>{
+ const f=await fixture(t);await writeFile(join(f.sourceRoot,'a'),'hello');
+ const expectedManifest=manifest([record('a','hello')]);let checks=0;
+ const paused=await ingestSourceInventory({...f,expectedManifest,checkCapacity:async()=>++checks<=1});
+ assert.equal(paused.status,'PAUSED');
+ assert.equal(f.inventory.page().entries.length,0);
+ assert.equal((await ingestSourceInventory({...f,expectedManifest})).status,'INVENTORY_SEALED');
 });

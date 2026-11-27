@@ -30,8 +30,8 @@ export class HcieSourceStore{
    return h.digest('hex')===sha256&&unchanged(before,await fd.stat({bigint:true}));
   }catch{return false;}finally{await fd?.close();}
  }
- async capture(path,{maxBytes=67108864,signal}={}){
-  if(typeof path!=='string'||!isAbsolute(path)||!integer(maxBytes,0,2147483648))throw Error('Invalid source capture');
+ async capture(path,{maxBytes=67108864,signal,checkCapacity=async()=>true}={}){
+  if(typeof path!=='string'||!isAbsolute(path)||!integer(maxBytes,0,2147483648)||typeof checkCapacity!=='function')throw Error('Invalid source capture');
   const root=await this.root(),temporary=join(root,'.capture-'+randomUUID());
   let input,output;
   try{
@@ -42,6 +42,8 @@ export class HcieSourceStore{
    output=await open(temporary,'wx',0o600);
    const h=createHash('sha256'),buffer=Buffer.alloc(65536);let bytes=0;
    while(true){
+    if(signal?.aborted)throw Error('CANCELLED');
+    if(await checkCapacity()!==true)throw Error('SOURCE_CAPTURE_PAUSED');
     if(signal?.aborted)throw Error('CANCELLED');
     const {bytesRead}=await input.read(buffer,0,buffer.length,null);if(!bytesRead)break;
     bytes+=bytesRead;if(bytes>maxBytes)throw Error('SOURCE_LIMIT');
@@ -58,8 +60,8 @@ export class HcieSourceStore{
 }
 // Streaming inventory of an operator-prepared tree, excluding no files
 // silently. Unsupported paths are surfaced without fabricated source digests.
-export async function* snapshotSource({sourceRoot,store,maxFiles=100000,maxDirectories=100000,maxFileBytes=67108864,maxTotalBytes=2147483648,maxDepth=64,signal}={}){
- if(typeof sourceRoot!=='string'||!isAbsolute(sourceRoot)||typeof store?.capture!=='function'||typeof store?.root!=='function'||!integer(maxFiles,1,10000000)||!integer(maxDirectories,1,10000000)||!integer(maxFileBytes,0,2147483648)||!integer(maxTotalBytes,0,Number.MAX_SAFE_INTEGER)||!integer(maxDepth,1,128))throw Error('Invalid snapshot limits');
+export async function* snapshotSource({sourceRoot,store,maxFiles=100000,maxDirectories=100000,maxFileBytes=67108864,maxTotalBytes=2147483648,maxDepth=64,signal,checkCaptureCapacity=async()=>true}={}){
+ if(typeof sourceRoot!=='string'||!isAbsolute(sourceRoot)||typeof store?.capture!=='function'||typeof store?.root!=='function'||!integer(maxFiles,1,10000000)||!integer(maxDirectories,1,10000000)||!integer(maxFileBytes,0,2147483648)||!integer(maxTotalBytes,0,Number.MAX_SAFE_INTEGER)||!integer(maxDepth,1,128)||typeof checkCaptureCapacity!=='function')throw Error('Invalid snapshot limits');
  const root=resolve(sourceRoot),storage=await store.root();
  if(await realpath(root)!==root||!(await lstat(root)).isDirectory()||root===storage||inside(root,storage)||inside(storage,root))throw Error('Separate canonical source and storage roots required');
  let files=0,total=0,directories=0;
@@ -78,7 +80,7 @@ export async function* snapshotSource({sourceRoot,store,maxFiles=100000,maxDirec
    if(!s.isFile()){yield {path,status:'UNSUPPORTED',reason:s.isSymbolicLink()?'SYMLINK':'SPECIAL_FILE',bytes:null,sha256:null};continue;}
    if(s.size>maxFileBytes){yield {path,status:'EXCLUDED',reason:'FILE_SIZE_LIMIT',bytes:s.size,sha256:null};continue;}
    if(s.size>maxTotalBytes-total)throw Error('TOTAL_BYTE_LIMIT');
-   const captured=await store.capture(full,{maxBytes:Math.min(maxFileBytes,maxTotalBytes-total),signal});
+   const captured=await store.capture(full,{maxBytes:Math.min(maxFileBytes,maxTotalBytes-total),signal,checkCapacity:checkCaptureCapacity});
    total+=captured.bytes;yield {path,...captured,status:'INDEXED',reason:null};
   }
  }
