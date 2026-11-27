@@ -57,6 +57,10 @@ export class HcieMapQueue {
    return row?{taskId:row.id,...JSON.parse(row.descriptor),attempt:row.attempt,token,expiresAt}:null;
   });
  }
+ defer({taskId,token}={}){
+  if(!valid(taskId)||typeof token!=='string')throw Error('Invalid map lease');
+  return this.#tx(()=>this.#db.prepare("UPDATE map_tasks SET state=CASE WHEN attempt>=? THEN 'INCOMPLETE' ELSE 'QUEUED' END,token=NULL,until_ms=NULL WHERE id=? AND state='LEASED' AND token=? AND until_ms>?").run(this.#attempts,taskId,token,Date.now()).changes===1);
+ }
  complete({taskId,token,result}={}){
   if(!valid(taskId)||typeof token!=='string'||!result||!['ANALYZED','INCOMPLETE'].includes(result.status)||typeof result.summary!=='string'||result.summary.length>16384||!valid(result.chunkId)||!valid(result.chunkSha256)||!valid(result.policySha256))throw Error('Invalid map result');
   // Store only allowlisted fields. No engine verdict or claimed certification.
