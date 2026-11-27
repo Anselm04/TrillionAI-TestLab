@@ -14,7 +14,7 @@ export async function evaluateReleaseEvidence({requirements,evidence,reviewerPub
  const policySha256=hash(requirements);
  const expected=new Map(),submitted=new Map(),runs=new Set();
  for(const r of requirements){
-  if(!id.test(r?.checkId??'')||!id.test(r.deviceId??'')||!sha.test(r.buildSha256??'')||!sha.test(r.flowSha256??'')||expected.has(r.checkId))throw Error('Invalid requirement');
+  if(!r||typeof r.checkId!=='string'||typeof r.deviceId!=='string'||typeof r.buildSha256!=='string'||typeof r.flowSha256!=='string'||!id.test(r.checkId)||!id.test(r.deviceId)||!sha.test(r.buildSha256)||!sha.test(r.flowSha256)||(Object.hasOwn(r,'requireVideo')&&typeof r.requireVideo!=='boolean')||expected.has(r.checkId))throw Error('Invalid requirement');
   expected.set(r.checkId,r);
  }
  for(const e of evidence){
