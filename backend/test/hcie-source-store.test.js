@@ -46,3 +46,14 @@ test('directory budget bounds empty trees independently of file budget',async t=
  await assert.rejects(entries({...f,maxDirectories:0}),/Invalid snapshot limits/);
  assert.deepEqual(await entries({...f,maxDirectories:4}),[]);
 });
+
+test('mid-file capacity refusal removes provisional objects and permits retry',async t=>{
+ const f=await fixture(t),path=join(f.sourceRoot,'large');
+ await writeFile(path,Buffer.alloc(200000,65));
+ let checks=0;
+ await assert.rejects(f.store.capture(path,{checkCapacity:async()=>++checks<=1}),/SOURCE_CAPTURE_PAUSED/);
+ assert.deepEqual(await readdir(f.storage),[]);
+ const object=await f.store.capture(path);
+ assert.equal(object.bytes,200000);
+ assert.equal(await f.store.verify(object),true);
+});
