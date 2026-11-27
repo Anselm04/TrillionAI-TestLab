@@ -40,12 +40,16 @@ export class HcieCoordinator {
    if(s.phase==='INDEX'){
     const p=inventory.page({after:s.cursor,limit:1}),entry=p.entries[0];
     if(!entry){this.#advance('MANIFEST');return {status:'PROGRESS',phase:'MANIFEST'};}
-    if(entry.status==='INDEXED')await chunks.index({store,entry,maxChunkBytes:o.maxChunkBytes,maxChunks:o.maxChunks,signal,checkCapacity});
+    try{
+     if(entry.status==='INDEXED')await chunks.index({store,entry,maxChunkBytes:o.maxChunkBytes,maxChunks:o.maxChunks,signal,checkCapacity});
+    }catch(e){if(e?.message==='CHUNKING_PAUSED')return {status:'PAUSED',phase:s.phase};throw e;}
     if(signal?.aborted)return {status:'PAUSED',phase:s.phase};
     this.#advance('INDEX',entry.path);return {status:'PROGRESS',phase:'INDEX'};
    }
    if(s.phase==='MANIFEST'){
-    const m=await deriveSchedulingManifest({...o,inventory,chunks,signal,checkCapacity});
+    let m;
+    try{m=await deriveSchedulingManifest({...o,inventory,chunks,signal,checkCapacity});}
+    catch(e){if(e?.message==='Scheduling manifest paused')return {status:'PAUSED',phase:s.phase};throw e;}
     this.#db.prepare("UPDATE coordinator SET manifest=?,phase='SCHEDULE',cursor='',ordinal=-1 WHERE id=1").run(JSON.stringify(m));
     return {status:'PROGRESS',phase:'SCHEDULE'};
    }

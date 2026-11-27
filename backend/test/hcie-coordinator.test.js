@@ -70,3 +70,23 @@ test('coordinator reopens after every durable step and preserves rejected review
  const c=new HcieCoordinator(f.path,f.options);
  try{assert.deepEqual(await c.step(deps),result);}finally{c.close();}
 });
+
+test('mid-index and manifest resource refusal preserve checkpoints and resume',async t=>{
+ const f=await fixture(t),c=new HcieCoordinator(f.path,f.options);
+ try{
+  let calls=0;
+  const initial=c.status();
+  assert.deepEqual(await c.step({...f.deps,checkCapacity:async()=>++calls<=2}),{status:'PAUSED',phase:'INDEX'});
+  assert.deepEqual(c.status(),initial);
+  await c.step(f.deps);
+  await c.step(f.deps);
+  assert.equal(c.status().phase,'MANIFEST');
+  const before=c.status();calls=0;
+  assert.deepEqual(await c.step({...f.deps,checkCapacity:async()=>++calls<=1}),{status:'PAUSED',phase:'MANIFEST'});
+  assert.deepEqual(c.status(),before);
+  const result=await finish(c,f.deps);
+  assert.equal(result.analyzed,3);
+  assert.equal(result.incomplete,0);
+  assert.deepEqual(f.seen,['abcd','efgh','ijkl']);
+ }finally{c.close();}
+});
