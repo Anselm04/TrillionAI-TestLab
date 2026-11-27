@@ -5,11 +5,13 @@ import {isAbsolute} from 'node:path';
 // Only trusted host-registered commands. A process group is NOT a sandbox:
 // descendants can escape it. Containers and VMs require separate cleanup.
 export function runBoundedProcess({binary,args=[],cwd,timeoutMs=30000,outputLimit=128000,signal}={}){
- if(!['linux','darwin'].includes(process.platform)||typeof binary!=='string'||!isAbsolute(binary)||!Array.isArray(args)||args.length>256||args.some(a=>typeof a!=='string'||a.includes('\0')||a.length>16384)||!Number.isInteger(timeoutMs)||timeoutMs<10||timeoutMs>3600000||!Number.isInteger(outputLimit)||outputLimit<1||outputLimit>1048576||(cwd!==undefined&&(typeof cwd!=='string'||!isAbsolute(cwd))))throw Error('Invalid trusted process configuration');
+ if(!['linux','darwin'].includes(process.platform)||typeof binary!=='string'||binary.includes('\0')||!isAbsolute(binary)||!Array.isArray(args)||args.length>256||args.some(a=>typeof a!=='string'||a.includes('\0')||a.length>16384)||!Number.isInteger(timeoutMs)||timeoutMs<10||timeoutMs>3600000||!Number.isInteger(outputLimit)||outputLimit<1||outputLimit>1048576||(cwd!==undefined&&(typeof cwd!=='string'||cwd.includes('\0')||!isAbsolute(cwd))))throw Error('Invalid trusted process configuration');
  if(signal?.aborted)return Promise.resolve({status:'CANCELLED',exitCode:null,output:'',outputTruncated:false,terminationConfirmed:false});
  return new Promise(resolve=>{
   const start=performance.now();
-  const child=spawn(binary,args,{cwd,detached:true,shell:false,stdio:['ignore','pipe','pipe'],env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'}});
+  let child;
+  try{child=spawn(binary,args,{cwd,detached:true,shell:false,stdio:['ignore','pipe','pipe'],env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'}});}
+  catch{return resolve({status:'INFRASTRUCTURE_ERROR',exitCode:null,output:'',outputTruncated:false,terminationConfirmed:false,elapsedMs:Math.ceil(performance.now()-start)});}
   const chunks=[];let size=0,truncated=false,reason=null,done=false,timer,watchdog,killFailed=false;
   function collect(chunk){
    const remaining=outputLimit-size;
