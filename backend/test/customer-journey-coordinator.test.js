@@ -5,8 +5,8 @@ const buildSha256='a'.repeat(64);
 const catalog={syntheticOnly:true,networkIsolationConfirmed:true,packageName:'com.test.app',buildSha256,selectors:[{text:'Welcome',permission:'observe'}]};
 const journey={id:'welcome',packageName:catalog.packageName,steps:[{action:'launch'},{action:'assertVisible',text:'Welcome'},{action:'stop'}]};
 function fixture(){
- const calls=[];
- return {calls,config:{catalog,propose:async()=>[journey,{...journey,id:'second'}],artifact:{apkPath:'/fixtures/test.apk',apkSha256:buildSha256,signerSha256:['b'.repeat(64)]},deviceId:'device-1',verifyIsolation:async()=>true,issueChallenge:async ctx=>({...ctx,challengeId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'}),orchestrator:{run:async input=>{calls.push(input);return {status:'EVIDENCE_REVIEWED'};}}}};
+ const calls=[];let challengeCount=0;
+ return {calls,config:{catalog,propose:async()=>[journey,{...journey,id:'second'}],artifact:{apkPath:'/fixtures/test.apk',apkSha256:buildSha256,signerSha256:['b'.repeat(64)]},deviceId:'device-1',verifyIsolation:async()=>true,issueChallenge:async ctx=>({...ctx,challengeId:'aaaaaaaa-aaaa-4aaa-8aaa-'+String(++challengeCount).padStart(12,'0')}),orchestrator:{run:async input=>{calls.push(input);return {status:'EVIDENCE_REVIEWED'};}}}};
 }
 test('execute validated journeys sequentially with trusted artifact and review context',async()=>{
  const {calls,config}=fixture(),r=await runCustomerJourneySuite(config);
@@ -19,4 +19,15 @@ test('stop after failure and never execute without verified isolation',async()=>
  assert.equal(r.status,'BLOCKED');assert.equal(f.calls.length,0);assert.equal(r.results[1].status,'NOT_EXECUTED');
  const g=fixture();g.config.orchestrator.run=async input=>{g.calls.push(input);return {status:'BLOCKED'};};
  assert.equal((await runCustomerJourneySuite(g.config)).reviewed,0);assert.equal(g.calls.length,1);
+});
+
+test('customer journey suite blocks reused review challenges before executing another journey',async()=>{
+ const f=fixture();
+ f.config.issueChallenge=async ctx=>({...ctx,challengeId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'});
+ const r=await runCustomerJourneySuite(f.config);
+ assert.equal(r.status,'BLOCKED');
+ assert.equal(r.reviewed,1);
+ assert.equal(f.calls.length,1);
+ assert.equal(r.results[1].status,'BLOCKED');
+ assert.equal(r.deploymentAuthorized,false);
 });
