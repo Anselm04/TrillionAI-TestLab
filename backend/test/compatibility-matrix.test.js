@@ -31,3 +31,14 @@ test('verified software-only matrix never claims physical tests or release',asyn
  const r=await evaluateCompatibility({...args,targets:[web],observations:[observation(web,'browser1')]});
  assert.equal(r.status,'DECLARED_MATRIX_PASSED');assert.equal(r.physicalQualification,'NOT_REQUESTED');assert.equal(r.deploymentAuthorized,false);
 });
+
+test('independent verification cannot substitute a compatibility outcome',async()=>{
+ const original=observation(web,'browser1','FAILED');
+ const r=await evaluateCompatibility({...args,targets:[web],observations:[original],verifyObservation:async observed=>{
+  assert.equal(observed.status,'FAILED');
+  original.status='PASSED';observed.status='PASSED';return true;
+ }});
+ assert.equal(r.checks[0].status,'FAILED');
+ assert.equal(r.status,'VERIFIED_FAILURE');
+ assert.equal(r.productionReady,false);
+});

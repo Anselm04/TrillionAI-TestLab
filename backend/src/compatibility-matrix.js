@@ -18,7 +18,7 @@ export async function evaluateCompatibility({revisionSha256,targets,observations
  }
  for(const o of observations){
   if(!expected.has(o?.targetId)||submitted.has(o.targetId)||!valid(o.runId,id)||runs.has(o.runId))throw Error('Unexpected or duplicate observation');
-  submitted.set(o.targetId,o);runs.add(o.runId);
+  submitted.set(o.targetId,structuredClone(o));runs.add(o.runId);
  }
  const checks=[];
  for(const [targetId,t] of expected){
