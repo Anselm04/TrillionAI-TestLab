@@ -6,11 +6,11 @@ const sha=/^[a-f0-9]{64}$/;
 // This does not establish serializability for arbitrary databases.
 export async function verifyIncrementHistory({history,initial,final,revisionSha256,environmentId,verifyEvidence}={}){
  if(!Array.isArray(history)||!history.length||history.length>10000||!Number.isSafeInteger(initial)||!Number.isSafeInteger(final)||typeof revisionSha256!=='string'||!sha.test(revisionSha256)||!valid(environmentId)||typeof verifyEvidence!=='function')throw Error('Invalid history');
- const seen=new Set(),operations=[];
+ const seen=new Set(),evidenceIds=new Set(),operations=[];
  for(const o of history){
-  if(!valid(o?.id)||seen.has(o.id)||!Number.isSafeInteger(o.start)||!Number.isSafeInteger(o.end)||o.start<0||o.end<o.start||!['COMMITTED','ABORTED','UNKNOWN'].includes(o.status)||!Number.isSafeInteger(o.delta)||o.delta!==1||!valid(o.evidenceId))throw Error('Invalid operation');
+  if(!valid(o?.id)||seen.has(o.id)||!Number.isSafeInteger(o.start)||!Number.isSafeInteger(o.end)||o.start<0||o.end<o.start||!['COMMITTED','ABORTED','UNKNOWN'].includes(o.status)||!Number.isSafeInteger(o.delta)||o.delta!==1||!valid(o.evidenceId)||evidenceIds.has(o.evidenceId))throw Error('Invalid operation');
   if(o.status==='COMMITTED'&&!Number.isSafeInteger(o.result))throw Error('Invalid commit result');
-  seen.add(o.id);operations.push({id:o.id,start:o.start,end:o.end,status:o.status,delta:o.delta,result:o.status==='COMMITTED'?o.result:null,evidenceId:o.evidenceId});
+  seen.add(o.id);evidenceIds.add(o.evidenceId);operations.push({id:o.id,start:o.start,end:o.end,status:o.status,delta:o.delta,result:o.status==='COMMITTED'?o.result:null,evidenceId:o.evidenceId});
  }
  const evidence={revisionSha256,environmentId,initial,final,operations};
  const report=(status,extra={})=>({schemaVersion:1,status,...extra,historySha256:createHash('sha256').update(JSON.stringify(evidence)).digest('hex'),productionReady:false,deploymentAuthorized:false});
