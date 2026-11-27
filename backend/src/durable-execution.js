@@ -88,7 +88,7 @@ export class DurableExecution {
    const p=this.#profiles.get(row.profile);
    if(!p||p.definitionSha256!==row.definition||signal?.aborted)throw Error('Profile mismatch or cancellation');
    const observation=await p.execute(structuredClone(context),signal);
-   if(signal?.aborted||!observation||observation.runId!==row.id||observation.definitionSha256!==row.definition||observation.revisionSha256!==row.revision||!valid(observation.evidenceId,id)||!['PASSED','FAILED'].includes(observation.status))throw Error('Invalid observation');
+   if(signal?.aborted||!observation||observation.runId!==row.id||observation.profileId!==row.profile||observation.definitionSha256!==row.definition||observation.revisionSha256!==row.revision||!valid(observation.evidenceId,id)||!['PASSED','FAILED'].includes(observation.status))throw Error('Invalid observation');
    const encoded=JSON.stringify(observation);
    if(Buffer.byteLength(encoded)>262144)throw Error('Evidence summary too large');
    const canonical=JSON.parse(encoded);
