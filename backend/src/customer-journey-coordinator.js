@@ -5,14 +5,15 @@ export async function runCustomerJourneySuite({catalog,propose,engine='maestro',
  if(typeof deviceId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)||typeof artifact?.apkPath!=='string'||artifact.apkSha256!==catalog?.buildSha256||!Array.isArray(artifact.signerSha256)||!artifact.signerSha256.length||artifact.signerSha256.some(x=>typeof x!=='string'||!/^[a-f0-9]{64}$/.test(x))||typeof issueChallenge!=='function'||typeof orchestrator?.run!=='function'||typeof verifyIsolation!=='function')throw Error('Invalid suite configuration');
  const trustedArtifact={apkPath:artifact.apkPath,apkSha256:artifact.apkSha256,signerSha256:[...artifact.signerSha256]};
  const plans=await planCustomerJourneys({catalog,propose,engine,maxJourneys});
- const results=[];
+ const results=[],usedChallenges=new Set();
  let blocked=false;
  for(const plan of plans){
   if(blocked){results.push({journeyId:plan.journey.id,flowSha256:plan.flowSha256,status:'NOT_EXECUTED'});continue;}
   try{
    if(await verifyIsolation({deviceId,buildSha256:plan.buildSha256})!==true)throw Error('Isolation not verified');
    const challenge=await issueChallenge({deviceId,buildSha256:plan.buildSha256,flowSha256:plan.flowSha256});
-   if(challenge?.deviceId!==deviceId||challenge.buildSha256!==plan.buildSha256||challenge.flowSha256!==plan.flowSha256||typeof challenge.challengeId!=='string')throw Error('Challenge mismatch');
+   if(challenge?.deviceId!==deviceId||challenge.buildSha256!==plan.buildSha256||challenge.flowSha256!==plan.flowSha256||typeof challenge.challengeId!=='string'||!challenge.challengeId.trim()||usedChallenges.has(challenge.challengeId))throw Error('Challenge mismatch or reuse');
+   usedChallenges.add(challenge.challengeId);
    const result=await orchestrator.run({...trustedArtifact,deviceId,packageName:plan.journey.packageName,journey:plan.journey,engine:plan.engine,reviewChallengeId:challenge.challengeId,isolationConfirmed:true});
    blocked=result?.status!=='EVIDENCE_REVIEWED';
    results.push({journeyId:plan.journey.id,flowSha256:plan.flowSha256,status:blocked?'BLOCKED':'EVIDENCE_REVIEWED',result});
