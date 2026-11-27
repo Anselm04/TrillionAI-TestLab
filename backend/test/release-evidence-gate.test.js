@@ -26,3 +26,11 @@ test('release gate verifies signed evidence and blocks missing or reused runs',a
   assert.equal((await evaluateReleaseEvidence({...config,...override})).status,'BLOCKED');
  }
 });
+
+test('release policy rejects malformed video requirements and coerced identifiers',async()=>{
+ const reviewer=generateKeyPairSync('ed25519');
+ const requirement={checkId:'smoke',deviceId:'phone',buildSha256:'a'.repeat(64),flowSha256:'b'.repeat(64)};
+ for(const change of [{requireVideo:'true'},{requireVideo:1},{requireVideo:null},{checkId:123},{deviceId:['phone']},{buildSha256:['a'.repeat(64)]},{flowSha256:['b'.repeat(64)]}]){
+  await assert.rejects(evaluateReleaseEvidence({requirements:[{...requirement,...change}],evidence:[],reviewerPublicKey:reviewer.publicKey,store:{verify:async()=>assert.fail('unexpected verification')}}),/Invalid requirement/);
+ }
+});
