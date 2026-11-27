@@ -63,8 +63,8 @@ export class HcieReductionStore {
   return this.#tx(()=>{
    let m=this.#meta();if(!m.sealed)throw Error('Manifest not sealed');if(m.root)return {status:'REDUCED',rootId:m.root};
    let level=m.level,position=m.position,groups=0;
+   let size=this.#db.prepare('SELECT COUNT(*) AS n FROM reduce_nodes WHERE level=?').get(level).n;
    while(groups<maxGroups){
-    const size=this.#db.prepare('SELECT COUNT(*) AS n FROM reduce_nodes WHERE level=?').get(level).n;
     if(size===1&&position===0){
      const root=this.#decode(this.#db.prepare('SELECT * FROM reduce_nodes WHERE level=? AND position=0').get(level));
      if(root.analyzed+root.incomplete!==this.#expectedCount)throw Error('Root coverage mismatch');
@@ -72,7 +72,7 @@ export class HcieReductionStore {
      return {status:'REDUCED',rootId:root.id,analyzed:root.analyzed,incomplete:root.incomplete,testingComplete:false};
     }
     if(size<1||position>size)throw Error('Invalid reduction checkpoint');
-    if(position===size){level++;position=0;continue;}
+    if(position===size){level++;position=0;size=this.#db.prepare('SELECT COUNT(*) AS n FROM reduce_nodes WHERE level=?').get(level).n;continue;}
     const rows=this.#db.prepare('SELECT * FROM reduce_nodes WHERE level=? AND position>=? ORDER BY position LIMIT ?').all(level,position,this.#fanout);
     if(rows.length!==Math.min(this.#fanout,size-position)||rows.some((r,i)=>r.position!==position+i))throw Error('Missing child nodes');
     const children=rows.map(r=>this.#decode(r));
