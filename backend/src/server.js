@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { resolve } from 'node:path';
 import { executeRun, readStoredReport } from './core.js';
+import { compareRunReports } from './report-comparison.js';
 import { catalogCapabilities } from './capability-registry.js';
 import { createTestkubeClient } from './testkube-client.js';
 import { DurableDeviceLeases } from './durable-device-leases.js';
@@ -95,6 +96,15 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, report);
     } catch (err) { return send(res, 400, { error: err.message }); }
     finally { active = false; }
+  }
+  const comparison = /^\/runs\/compare\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(req.url || '');
+  if (comparison && req.method === 'GET') {
+    let before,after;
+    try { [before,after]=await Promise.all([readStoredReport(reportRoot,comparison[1]),readStoredReport(reportRoot,comparison[2])]); }
+    catch { return send(res,503,{error:'REPORT_UNAVAILABLE'}); }
+    if (!before||!after) return send(res,404,{error:'Not found'});
+    try { return send(res,200,compareRunReports(before,after)); }
+    catch { return send(res,409,{error:'REPORTS_INCOMPATIBLE'}); }
   }
   const match = /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(req.url || '');
   if (match && req.method === 'GET') {

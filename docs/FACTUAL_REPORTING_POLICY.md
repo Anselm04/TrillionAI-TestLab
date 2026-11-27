@@ -19,6 +19,8 @@ Every customer-facing test record must state:
 
 AI analysis is commentary. It must not overwrite the tool-produced execution observation. Suspected findings remain suspected until corroborated. Repeated runs must retain their individual outcomes: a later pass must never erase an earlier failure.
 
+The authenticated read-only `GET /runs/compare/{beforeId}/{afterId}` endpoint compares two saved local-runner reports for the same project and named check. It returns both observed statuses, flags changed execution context, and explicitly declines to establish source revision or environment equivalence. It does not rerun tests, alter reports, or establish that a defect was repaired.
+
 ## Integrity
 A checksum detects changes to a report given the original trusted checksum. A standalone checksum does NOT prove origin, prevent a privileged operator from rewriting history, or replace a signed attestation. Signed immutable evidence will require a dedicated later implementation and threat-model review.
 
