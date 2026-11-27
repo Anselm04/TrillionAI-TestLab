@@ -49,8 +49,150 @@ class FarmSnapshot {
       (d['leaseState'] ?? d['state']) == 'QUARANTINED').length;
 }
 
+class CapabilitySnapshot {
+  const CapabilitySnapshot(this.domains);
+  final List<Map<String, dynamic>> domains;
+  factory CapabilitySnapshot.parse(Object? data) {
+    if (data is! Map<String, dynamic> || data['schemaVersion'] != 1 ||
+        data['scope'] != 'DECLARED_LOCAL_RUNNER' ||
+        data['productionReady'] != false || data['domains'] is! List) {
+      throw const FormatException('Invalid capability catalog');
+    }
+    final domains = <Map<String, dynamic>>[];
+    final ids = <String>{};
+    for (final item in data['domains'] as List) {
+      if (item is! Map<String, dynamic> || item['id'] is! String ||
+          item['label'] is! String || item['runStatus'] != 'NOT_EXECUTED' ||
+          !['PARTIAL', 'NOT_IMPLEMENTED'].contains(item['implementationStatus']) ||
+          !ids.add(item['id'] as String)) {
+        throw const FormatException('Invalid capability domain');
+      }
+      domains.add(Map<String, dynamic>.unmodifiable(item));
+    }
+    if (domains.isEmpty) throw const FormatException('Empty capability catalog');
+    return CapabilitySnapshot(List<Map<String, dynamic>>.unmodifiable(domains));
+  }
+  int get partial => domains.where((d) => d['implementationStatus'] == 'PARTIAL').length;
+}
+
+String reportPath(String value) {
+  final id = value.trim();
+  if (!RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$').hasMatch(id)) {
+    throw const FormatException('Invalid report ID');
+  }
+  return '/runs/$id';
+}
+
+class RunReportSnapshot {
+  const RunReportSnapshot(this.data);
+  final Map<String, dynamic> data;
+  factory RunReportSnapshot.parse(Object? value, {String? expectedId}) {
+    if (value is! Map<String, dynamic> || value['schemaVersion'] != 1 ||
+        value['id'] is! String || value['project'] is! String ||
+        value['productionReady'] != false ||
+        !['PASSED', 'FAILED', 'TIMEOUT', 'INFRASTRUCTURE_ERROR', 'NOT_EXECUTED'].contains(value['status']) ||
+        value['observations'] is! List) {
+      throw const FormatException('Invalid run report');
+    }
+    final id = value['id'] as String;
+    if (reportPath(id) != '/runs/$id' || (expectedId != null && id != expectedId)) {
+      throw const FormatException('Report ID mismatch');
+    }
+    final observations = value['observations'] as List;
+    if (observations.length != 1 || observations.first is! Map<String, dynamic> ||
+        (observations.first as Map<String, dynamic>)['status'] != value['status']) {
+      throw const FormatException('Inconsistent local runner result');
+    }
+    final integrity = value['integrity'];
+    if (integrity is! Map<String, dynamic> ||
+        integrity['algorithm'] != 'sha256' ||
+        integrity['assertion'] != 'checksum-only-not-signed' ||
+        integrity['digest'] is! String ||
+        !RegExp(r'^[a-f0-9]{64}$').hasMatch(integrity['digest'] as String)) {
+      throw const FormatException('Missing report integrity metadata');
+    }
+    return RunReportSnapshot(Map<String, dynamic>.unmodifiable(value));
+  }
+  String get id => data['id'] as String;
+  String get status => data['status'] as String;
+  String get revisionLabel {
+    final revision = data['sourceRevision'];
+    if (revision is Map<String, dynamic> && revision['status'] == 'UNKNOWN') {
+      return 'Unknown (mutable workspace)';
+    }
+    return 'Not established by this local runner';
+  }
+}
+
+String comparisonPath(String before, String after) {
+  final a = before.trim(), b = after.trim();
+  reportPath(a);
+  reportPath(b);
+  if (a == b) throw const FormatException('Choose two different report IDs');
+  return '/runs/compare/$a/$b';
+}
+
+class ReportComparison {
+  const ReportComparison(this.project, this.status, this.beforeStatus, this.afterStatus);
+  final String project, status, beforeStatus, afterStatus;
+
+  factory ReportComparison.parse(Object? value, {required String beforeId, required String afterId}) {
+    comparisonPath(beforeId, afterId);
+    if (value is! Map<String, dynamic> || value['schemaVersion'] != 1 ||
+        value['profile'] != 'node-built-in-tests' || value['project'] is! String ||
+        value['productionReady'] != false || value['productCertified'] != false ||
+        value['revisionComparison'] != 'NOT_ESTABLISHED' || value['environmentEquivalenceVerified'] != false ||
+        !['OBSERVATIONS_MATCH', 'OBSERVATIONS_DIFFER', 'CONTEXT_DIFFERS'].contains(value['status'])) {
+      throw const FormatException('Invalid report comparison');
+    }
+    Map<String, dynamic> outcome(Object? item, String id) {
+      if (item is! Map<String, dynamic> || item['id'] != id ||
+          !['PASSED', 'FAILED', 'TIMEOUT', 'INFRASTRUCTURE_ERROR', 'NOT_EXECUTED'].contains(item['status']) ||
+          (item['exitCode'] != null && item['exitCode'] is! int) ||
+          item['integrityDigest'] is! String || !RegExp(r'^[a-f0-9]{64}$').hasMatch(item['integrityDigest'] as String)) {
+        throw const FormatException('Invalid comparison outcome');
+      }
+      return item;
+    }
+    final a = outcome(value['before'], beforeId), b = outcome(value['after'], afterId);
+    final matches = a['status'] == b['status'] && a['exitCode'] == b['exitCode'];
+    if (value['status'] != 'CONTEXT_DIFFERS' && (value['status'] == 'OBSERVATIONS_MATCH') != matches) {
+      throw const FormatException('Inconsistent comparison outcome');
+    }
+    return ReportComparison(value['project'] as String, value['status'] as String, a['status'] as String, b['status'] as String);
+  }
+}
+
+class QualificationTemplate {
+  const QualificationTemplate(this.requirements);
+  final List<Map<String, dynamic>> requirements;
+  factory QualificationTemplate.parse(Object? value) {
+    if (value is! Map<String, dynamic> || value['schemaVersion'] != 1 ||
+        value['product'] != 'AppForge' || value['version'] != 1 ||
+        value['scope'] != 'INITIAL_FUNCTIONAL_JOURNEY' ||
+        value['productionReady'] != false || value['deploymentAuthorized'] != false ||
+        value['requirements'] is! List) {
+      throw const FormatException('Invalid qualification template');
+    }
+    final rows = value['requirements'] as List;
+    final expected = {for (var i = 1; i <= 19; i++) 'AF-${i.toString().padLeft(3, '0')}'};
+    final requirements = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      if (row is! Map<String, dynamic> || row['id'] is! String ||
+          !expected.remove(row['id']) || row['title'] is! String ||
+          (row['title'] as String).trim().isEmpty || row['status'] != 'NOT_EXECUTED') {
+        throw const FormatException('Invalid qualification requirement');
+      }
+      requirements.add(Map<String, dynamic>.unmodifiable(row));
+    }
+    if (expected.isNotEmpty) throw const FormatException('Incomplete qualification template');
+    return QualificationTemplate(List<Map<String, dynamic>>.unmodifiable(requirements));
+  }
+}
+
 class TestLabHome extends StatefulWidget {
-  const TestLabHome({super.key});
+  const TestLabHome({super.key, this.httpClient});
+  final http.Client? httpClient;
   @override
   State<TestLabHome> createState() => _TestLabHomeState();
 }
@@ -59,13 +201,23 @@ class _TestLabHomeState extends State<TestLabHome> {
   final endpoint = TextEditingController(text: 'http://127.0.0.1:8787');
   final token = TextEditingController();
   final project = TextEditingController(text: 'node-sample');
-  final client = http.Client();
+  final reportId = TextEditingController();
+  final beforeId = TextEditingController();
+  final afterId = TextEditingController();
+  late final client = widget.httpClient ?? http.Client();
   bool running = false;
   String result = 'No test runs yet';
+  RunReportSnapshot? runReport;
   String filter = 'all';
   FarmSnapshot? farm;
   DateTime? observedAt;
   String? farmError;
+  CapabilitySnapshot? capabilities;
+  String? capabilityError;
+  ReportComparison? comparison;
+  String? comparisonError;
+  QualificationTemplate? qualification;
+  String? qualificationError;
 
   Future<Object?> request(String path, {Map<String, String>? body}) async {
     final uri = apiUri(endpoint.text, path);
@@ -86,12 +238,35 @@ class _TestLabHomeState extends State<TestLabHome> {
 
   Future<void> runTests() async {
     if (running) return;
-    setState(() { running = true; result = 'Executing tests...'; });
+    setState(() { running = true; runReport = null; result = 'Executing tests...'; });
     try {
       final data = await request('/runs', body: {'project': project.text.trim()});
-      if (mounted) setState(() => result = const JsonEncoder.withIndent('  ').convert(data));
+      final snapshot = RunReportSnapshot.parse(data);
+      if (mounted) setState(() {
+        runReport = snapshot;
+        reportId.text = snapshot.id;
+        result = const JsonEncoder.withIndent('  ').convert(snapshot.data);
+      });
     } catch (_) {
       if (mounted) setState(() => result = 'Test request failed.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
+  Future<void> retrieveReport() async {
+    if (running) return;
+    final requestedId = reportId.text.trim();
+    setState(() { running = true; runReport = null; result = 'Retrieving saved report...'; });
+    try {
+      final snapshot = RunReportSnapshot.parse(
+          await request(reportPath(requestedId)), expectedId: requestedId);
+      if (mounted) setState(() {
+        runReport = snapshot;
+        result = const JsonEncoder.withIndent('  ').convert(snapshot.data);
+      });
+    } catch (_) {
+      if (mounted) setState(() => result = 'Saved report unavailable or invalid.');
     } finally {
       if (mounted) setState(() => running = false);
     }
@@ -110,9 +285,50 @@ class _TestLabHomeState extends State<TestLabHome> {
     }
   }
 
+  Future<void> compareReports() async {
+    if (running) return;
+    final before = beforeId.text.trim(), after = afterId.text.trim();
+    setState(() { running = true; comparison = null; comparisonError = null; });
+    try {
+      final result = ReportComparison.parse(await request(comparisonPath(before, after)), beforeId: before, afterId: after);
+      if (mounted) setState(() => comparison = result);
+    } catch (_) {
+      if (mounted) setState(() => comparisonError = 'Comparison unavailable or incompatible.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
+  Future<void> inspectCapabilities() async {
+    if (running) return;
+    setState(() { running = true; capabilities = null; capabilityError = null; });
+    try {
+      final snapshot = CapabilitySnapshot.parse(await request('/capabilities'));
+      if (mounted) setState(() => capabilities = snapshot);
+    } catch (_) {
+      if (mounted) setState(() => capabilityError = 'Capability catalog unavailable.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
+  Future<void> inspectQualification() async {
+    if (running) return;
+    setState(() { running = true; qualification = null; qualificationError = null; });
+    try {
+      final snapshot = QualificationTemplate.parse(await request('/qualification/templates/appforge'));
+      if (mounted) setState(() => qualification = snapshot);
+    } catch (_) {
+      if (mounted) setState(() => qualificationError = 'Qualification template unavailable or invalid.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
   @override
   void dispose() {
-    client.close(); endpoint.dispose(); token.dispose(); project.dispose();
+    if (widget.httpClient == null) client.close();
+    endpoint.dispose(); token.dispose(); project.dispose(); reportId.dispose(); beforeId.dispose(); afterId.dispose();
     super.dispose();
   }
 
@@ -153,9 +369,52 @@ class _TestLabHomeState extends State<TestLabHome> {
             )),
         ],
         const Divider(height: 32),
+        Text('Testing capabilities', style: Theme.of(context).textTheme.headlineSmall),
+        OutlinedButton.icon(onPressed: running ? null : inspectCapabilities, icon: const Icon(Icons.refresh), label: const Text('Refresh capabilities')),
+        const Text('Declared local runner capabilities only; no customer tests have been executed by this view.'),
+        if (capabilityError != null) Text(capabilityError!),
+        if (capabilities != null) ...[
+          Text('Partial coverage domains: ${capabilities!.partial} / ${capabilities!.domains.length}'),
+          for (final domain in capabilities!.domains)
+            ListTile(title: Text(domain['label'] as String), subtitle: Text('${domain['implementationStatus']} · NOT_EXECUTED')),
+        ],
+        const Divider(height: 32),
+        Text('AppForge qualification planning', style: Theme.of(context).textTheme.headlineSmall),
+        OutlinedButton.icon(onPressed: running ? null : inspectQualification, icon: const Icon(Icons.checklist), label: const Text('View AppForge qualification scope')),
+        if (qualificationError != null) Text(qualificationError!),
+        if (qualification != null) ...[
+          Text('Requirements planned: ${qualification!.requirements.length}'),
+          const Text('No AppForge tests executed by this view.'),
+          const Text('Initial functional scope only; the submitted revision and complete coverage remain to be established.'),
+          for (final requirement in qualification!.requirements)
+            ListTile(title: Text('${requirement['id']} — ${requirement['title']}'), subtitle: const Text('NOT_EXECUTED')),
+        ],
+        const Divider(height: 32),
         TextField(controller: project, enabled: !running, decoration: const InputDecoration(labelText: 'Workspace project directory')),
         FilledButton.icon(onPressed: running ? null : runTests, icon: const Icon(Icons.science), label: const Text('Run Node.js test suite')),
+        const Divider(height: 32),
+        Text('Saved test report', style: Theme.of(context).textTheme.headlineSmall),
+        TextField(controller: reportId, enabled: !running, decoration: const InputDecoration(labelText: 'Report ID')),
+        OutlinedButton.icon(onPressed: running ? null : retrieveReport, icon: const Icon(Icons.receipt_long), label: const Text('Retrieve saved report')),
+        if (runReport != null) ...[
+          Text('Observed result: ${runReport!.status}'),
+          Text('Source revision: ${runReport!.revisionLabel}'),
+          const Text('Checksum metadata is not a signature or product certification.'),
+        ],
         SelectableText(result),
+        const Divider(height: 32),
+        Text('Compare saved runs', style: Theme.of(context).textTheme.headlineSmall),
+        TextField(controller: beforeId, enabled: !running, decoration: const InputDecoration(labelText: 'Earlier report ID')),
+        TextField(controller: afterId, enabled: !running, decoration: const InputDecoration(labelText: 'Later report ID')),
+        OutlinedButton.icon(onPressed: running ? null : compareReports, icon: const Icon(Icons.compare_arrows), label: const Text('Compare reports')),
+        if (comparisonError != null) Text(comparisonError!),
+        if (comparison != null) ...[
+          Text('Project: ${comparison!.project}'),
+          Text('Comparison: ${comparison!.status}'),
+          Text('Earlier result: ${comparison!.beforeStatus}'),
+          Text('Later result: ${comparison!.afterStatus}'),
+          const Text('Source revision and environment equivalence are not established. A changed outcome does not prove a repair.'),
+        ],
         const SizedBox(height: 24),
         const Text('Inventory is observational. This dashboard does not certify readiness or deploy applications.'),
       ]),

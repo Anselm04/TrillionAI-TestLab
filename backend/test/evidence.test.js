@@ -36,3 +36,28 @@ test('unexecuted test is never recorded as passing', () => {
   const obs=makeObservation({checkId:'missing',command:'node --test',runnerResult:undefined,environment:'linux'});
   assert.equal(obs.status,'INFRASTRUCTURE_ERROR');
 });
+
+test('sealing rejects contradictory execution outcomes', () => {
+  const obs = makeObservation({checkId:'unit',command:'node --test',runnerResult:{exitCode:0},environment:'linux'});
+  for (const change of [
+    {timedOut:true},
+    {evidence:{...obs.evidence,executorError:'runtime error'}},
+    {status:'FAILED'},
+    {status:'FAILED',exitCode:125},
+    {status:'FAILED',exitCode:-1},
+    {status:'TIMEOUT',timedOut:false},
+    {status:'NOT_EXECUTED',exitCode:null,timedOut:true},
+  ]) {
+    assert.throws(() => sealReport({observations:[{...obs,...change}]}), /inconsistent/i);
+  }
+});
+
+test('sealed reports are independent snapshots and reject contradictory single-check summaries', () => {
+  const obs=makeObservation({checkId:'unit',command:'node --test',runnerResult:{exitCode:1},environment:'linux'});
+  const draft={status:'FAILED',observations:[obs],productionReady:false};
+  const sealed=sealReport(draft);
+  draft.observations[0].reason='updated outside report';
+  assert.notEqual(sealed.observations[0].reason,draft.observations[0].reason);
+  assert.equal(verifyReportChecksum(sealed),true);
+  assert.throws(()=>sealReport({...draft,status:'PASSED'}),/Inconsistent report status/);
+});

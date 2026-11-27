@@ -1,0 +1,7 @@
+# AppForge — initial functional qualification scope
+
+AppForge is the first intended product submission. The versioned checklist in `backend/src/appforge-qualification.js` describes 19 proposed functional requirements based on the stated customer journey, spanning onboarding, subscription and credits, fixture generation, editing, preview, export, simulated deployment configuration, failure handling and customer history.
+
+The authenticated read-only `GET /qualification/templates/appforge` endpoint exposes the checklist. The Flutter dashboard retrieves and displays the initial versioned scope without executing any test. Each requirement starts `NOT_EXECUTED`. No AppForge repository has been submitted, no product behavior is inferred from this checklist, and this is not a comprehensive qualification plan. Before actual qualification, confirm the scope against the selected AppForge revision and map independently defined tests to each applicable requirement. Missing mappings remain `NOT_TESTED` in the traceability report.
+
+The `createAppForgeQualificationPlan` helper requires an immutable revision digest and accepts separately prepared test mappings. It does not execute tests, generate customer code, call live AI providers, bill customers or deploy any product. Use synthetic accounts, mocked providers and sandbox billing only. Additional platform, resilience, accessibility and other approved qualification requirements need separate explicit coverage accounting before release consideration.

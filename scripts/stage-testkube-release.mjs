@@ -83,8 +83,8 @@ export async function stageRelease({input,evidence,source,output,commit,runId}) 
   for(const component of ['init','scraper']) copyFileSync(join(evidence,`${component}-LICENSE`),join(notices,`${component}-LICENSE`));
   const security=join(output,'evidence'); mkdirSync(security);
   for(const p of ['scanned-artifacts.sha256','api-build-modules.txt','init-build-modules.txt','scraper-build-modules.txt','init-sbom.json','scraper-sbom.json','init-apk-installed.txt','scraper-apk-installed.txt','init-vulnerabilities.json','scraper-vulnerabilities.json','_temp-testkube-api.txt','executor-init-runner.txt','executor-scraper-runner.txt']) copyFileSync(join(evidence,p),join(security,p));
-  writeFileSync(join(output,'release-manifest.json'),JSON.stringify({candidateVersion:`testkube-v1.16.0-testlab.${commit.slice(0,12)}`,commit,runId,sourceCounts,scannedArtifacts:tested,distributionAuthorized:false},null,2)+'\n');
-  writeFileSync(join(output,'DISTRIBUTION-README.txt'),'Qualification staging only. Do not publish. Before authorized distribution, provide the matching source/ and notices/ alongside the exact artifacts/ with durable recipient access, and retain SHA256SUMS. Release approval and license review are separate.\n');
+  writeFileSync(join(output,'release-manifest.json'),JSON.stringify({candidateVersion:`testkube-v1.16.0-testlab.${commit.slice(0,12)}`,commit,runId,sourceCounts,scannedArtifacts:tested,distributionAuthorized:false,hostedProductionAuthorized:false},null,2)+'\n');
+  writeFileSync(join(output,'DISTRIBUTION-README.txt'),'Qualification staging only. Do not publish or activate hosted production. Before authorized distribution, provide the matching source/ and notices/ alongside the exact artifacts/ with durable recipient access, and retain SHA256SUMS. Distribution review and hosted production approval are separate decisions; this staging package grants neither.\n');
   const files=walk(output), lines=[];
   for(const p of files) lines.push(`${await digest(join(output,p))}  ${p}`);
   const sums=join(output,'SHA256SUMS'); writeFileSync(sums,lines.join('\n')+'\n');

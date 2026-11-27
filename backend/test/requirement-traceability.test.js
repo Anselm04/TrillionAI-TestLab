@@ -7,6 +7,19 @@ const revisionSha256='a'.repeat(64),definitionSha256='b'.repeat(64);
 const req=(id)=>({id,title:id});
 const check=(id,requirementIds)=>({id,requirementIds,definitionSha256,environmentId:'ubuntu'});
 const obs=(testId,status='PASSED')=>({testId,status,revisionSha256,definitionSha256,environmentId:'ubuntu',evidenceId:'run-'+testId});
+test('traceability keeps the original submitted observation stable during asynchronous verification',async()=>{
+ const plan=createTraceabilityPlan({revisionSha256,requirements:[req('r')],tests:[check('one',['r'])]});
+ const observation=obs('one','FAILED');
+ const report=await evaluateTraceability({plan,observations:[observation],verifyObservation:async verified=>{
+  assert.equal(verified.status,'FAILED');
+  observation.status='PASSED';
+  observation.evidenceId='different-run';
+  return true;
+ }});
+ assert.equal(report.tests[0].status,'FAILED');
+ assert.equal(report.tests[0].evidenceId,'run-one');
+ assert.equal(report.requirements[0].status,'FAILED');
+});
 test('traceability preserves uncovered requirements, failures, partial and unverified coverage',async()=>{
  const plan=createTraceabilityPlan({revisionSha256,requirements:['pass','fail','partial','untested','unverified'].map(req),tests:[check('one',['pass','partial']),check('two',['fail']),check('three',['partial']),check('four',['unverified'])]});
  const report=await evaluateTraceability({plan,observations:[obs('one'),obs('two','FAILED'),{...obs('four'),revisionSha256:'c'.repeat(64)}],verifyObservation:async()=>true});

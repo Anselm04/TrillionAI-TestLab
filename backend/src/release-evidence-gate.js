@@ -7,6 +7,11 @@ const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 // supplied by an untrusted worker. This gate cannot authorize deployment.
 export async function evaluateReleaseEvidence({requirements,evidence,reviewerPublicKey,store}){
  if(!Array.isArray(requirements)||!requirements.length||requirements.length>500||!Array.isArray(evidence)||evidence.length>500||typeof store?.verify!=='function'||reviewerPublicKey?.asymmetricKeyType!=='ed25519')throw Error('Invalid release policy');
+ // Review one stable policy/evidence snapshot. The asynchronous artifact
+ // verifier receives a detached manifest, not references to the input objects.
+ requirements=structuredClone(requirements);
+ evidence=structuredClone(evidence);
+ const policySha256=hash(requirements);
  const expected=new Map(),submitted=new Map(),runs=new Set();
  for(const r of requirements){
   if(!id.test(r?.checkId??'')||!id.test(r.deviceId??'')||!sha.test(r.buildSha256??'')||!sha.test(r.flowSha256??'')||expected.has(r.checkId))throw Error('Invalid requirement');
@@ -24,7 +29,7 @@ export async function evaluateReleaseEvidence({requirements,evidence,reviewerPub
     const {manifest:m,attestation:a,review:v}=e,b=a.body;
     if(!id.test(b.runId??'')||runs.has(b.runId))throw Error('Duplicate run');
     if(b.deviceId!==r.deviceId||b.buildSha256!==r.buildSha256||b.flowSha256!==r.flowSha256||b.journeyStatus!=='COMMAND_SUCCEEDED'||m.runId!==b.runId||m.deviceId!==b.deviceId||m.buildSha256!==b.buildSha256||m.flowSha256!==b.flowSha256||hash(m)!==b.manifestSha256)throw Error('Context mismatch');
-    if(!verifyMobileReview({review:v,attestation:a,reviewerPublicKey})||v.body.decision!=='EVIDENCE_ACCEPTED'||!await store.verify(m))throw Error('Review or artifact verification failed');
+    if(!verifyMobileReview({review:v,attestation:a,reviewerPublicKey})||v.body.decision!=='EVIDENCE_ACCEPTED'||!await store.verify(structuredClone(m)))throw Error('Review or artifact verification failed');
     const kinds=new Set(m.artifacts.map(x=>x.kind));
     if(!kinds.has('log')||!kinds.has('screenshot')||(r.requireVideo===true&&!kinds.has('video')))throw Error('Required artifacts missing');
     runs.add(b.runId);reason=null;
@@ -32,5 +37,5 @@ export async function evaluateReleaseEvidence({requirements,evidence,reviewerPub
   }
   checks.push({checkId,status:reason?'BLOCKED':'VERIFIED',reason});
  }
- return {status:checks.every(c=>c.status==='VERIFIED')?'REQUIRED_EVIDENCE_VERIFIED':'BLOCKED',checks,policySha256:hash(requirements),productionReady:false,deploymentAuthorized:false};
+ return {status:checks.every(c=>c.status==='VERIFIED')?'REQUIRED_EVIDENCE_VERIFIED':'BLOCKED',checks,policySha256,productionReady:false,deploymentAuthorized:false};
 }

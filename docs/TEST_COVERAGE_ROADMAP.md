@@ -10,7 +10,7 @@ TestLab's priority is trustworthy, repeatable **testing**, never building, repai
 - `PASSED` / `FAILED`: one named executed check, supported by machine-collected evidence.
 - `TIMEOUT` / `INFRASTRUCTURE_ERROR`: inability to complete a valid test observation.
 
-The `backend/src/capability-registry.js` module is the machine-readable inventory. It intentionally advertises only Node.js built-in tests as currently executable.
+The `backend/src/capability-registry.js` module is the machine-readable inventory. It intentionally advertises only Node.js built-in tests as currently executable. The authenticated read-only `GET /capabilities` endpoint and Flutter capability view expose this declared local-runner catalog. This is not an inventory of every experimental component, a runtime availability probe, or evidence that a customer's tests have been run.
 
 ## Expansion order, based on risk and dependencies
 

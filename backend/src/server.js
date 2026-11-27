@@ -1,7 +1,9 @@
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { executeRun } from './core.js';
+import { resolve } from 'node:path';
+import { executeRun, readStoredReport } from './core.js';
+import { compareRunReports } from './report-comparison.js';
+import { catalogCapabilities } from './capability-registry.js';
+import { appForgeQualificationTemplate } from './appforge-qualification.js';
 import { createTestkubeClient } from './testkube-client.js';
 import { DurableDeviceLeases } from './durable-device-leases.js';
 import { MobileJobs } from './mobile-jobs.js';
@@ -35,6 +37,12 @@ function send(res, code, data) { res.writeHead(code, { 'content-type': 'applicat
 const server = http.createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') return send(res, 200, { ok: true, service: 'TrillionAI-TestLab', version: '0.1.0' });
   if (req.headers.authorization !== 'Bearer ' + token) return send(res, 401, { error: 'Unauthorized' });
+  if (req.url === '/capabilities' && req.method === 'GET') {
+    return send(res,200,{schemaVersion:1,scope:'DECLARED_LOCAL_RUNNER',domains:catalogCapabilities(),productionReady:false});
+  }
+  if (req.url === '/qualification/templates/appforge' && req.method === 'GET') {
+    return send(res,200,appForgeQualificationTemplate());
+  }
   if (req.url === '/device-farm' && req.method === 'GET') {
     if(rack){try{return send(res,200,{status:'RACK_SNAPSHOT',devices:rack.inventory(),productionReady:false});}catch{return send(res,503,{status:'INFRASTRUCTURE_ERROR',devices:[],productionReady:false});}}
     if(!farmEnabled)return send(res,200,{status:'NOT_CONFIGURED',devices:[],productionReady:false});
@@ -93,10 +101,21 @@ const server = http.createServer(async (req, res) => {
     } catch (err) { return send(res, 400, { error: err.message }); }
     finally { active = false; }
   }
-  const match = /^\/runs\/([0-9a-f-]{36})$/.exec(req.url || '');
+  const comparison = /^\/runs\/compare\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(req.url || '');
+  if (comparison && req.method === 'GET') {
+    let before,after;
+    try { [before,after]=await Promise.all([readStoredReport(reportRoot,comparison[1]),readStoredReport(reportRoot,comparison[2])]); }
+    catch { return send(res,503,{error:'REPORT_UNAVAILABLE'}); }
+    if (!before||!after) return send(res,404,{error:'Not found'});
+    try { return send(res,200,compareRunReports(before,after)); }
+    catch { return send(res,409,{error:'REPORTS_INCOMPATIBLE'}); }
+  }
+  const match = /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(req.url || '');
   if (match && req.method === 'GET') {
-    try { return send(res, 200, JSON.parse(await readFile(join(reportRoot, match[1] + '.json'), 'utf8'))); }
-    catch { return send(res, 404, { error: 'Not found' }); }
+    try {
+      const report = await readStoredReport(reportRoot,match[1]);
+      return report ? send(res,200,report) : send(res,404,{error:'Not found'});
+    } catch { return send(res,503,{error:'REPORT_UNAVAILABLE'}); }
   }
   return send(res, 404, { error: 'Not found' });
 });
