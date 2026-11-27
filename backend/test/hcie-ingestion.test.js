@@ -44,3 +44,15 @@ test('capacity refusal during source capture pauses ingestion without sealing',a
  assert.equal(f.inventory.page().entries.length,0);
  assert.equal((await ingestSourceInventory({...f,expectedManifest})).status,'INVENTORY_SEALED');
 });
+
+test('independent manifest cannot be substituted during asynchronous ingestion',async t=>{
+ const f=await fixture(t);await writeFile(join(f.sourceRoot,'a'),'hello');
+ const expectedManifest=manifest([record('a','wrong')]);
+ const replacement=manifest([record('a','hello')]);
+ const result=await ingestSourceInventory({...f,expectedManifest,checkCapacity:async()=>{
+  Object.assign(expectedManifest,replacement);return true;
+ }});
+ assert.equal(result.status,'INCOMPLETE');
+ assert.match(result.reason,/Inventory manifest mismatch/);
+ assert.equal(f.inventory.append([record('b','new')]).added,1);
+});

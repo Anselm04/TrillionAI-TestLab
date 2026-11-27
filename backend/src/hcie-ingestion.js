@@ -4,6 +4,7 @@ const sha=/^[a-f0-9]{64}$/;
 // incomplete traversal never seals; committed batches remain resumable.
 export async function ingestSourceInventory({inventory,store,sourceRoot,expectedManifest,checkCapacity,signal,batchSize=64,limits={}}={}){
  if(typeof inventory?.append!=='function'||typeof inventory?.seal!=='function'||typeof store?.verify!=='function'||typeof checkCapacity!=='function'||!Number.isInteger(batchSize)||batchSize<1||batchSize>256||!Number.isSafeInteger(expectedManifest?.expectedFileCount)||expectedManifest.expectedFileCount<1||typeof expectedManifest.expectedDigest!=='string'||!sha.test(expectedManifest.expectedDigest))throw Error('Invalid ingestion configuration');
+ const manifest=Object.freeze({expectedFileCount:expectedManifest.expectedFileCount,expectedDigest:expectedManifest.expectedDigest});
  let scanned=0,indexed=0,unavailable=0,added=0;
  const batch=[];
  const report=(status,extra={})=>({status,scanned,indexed,unavailable,added,analysisComplete:false,testingComplete:false,...extra});
@@ -18,13 +19,13 @@ export async function ingestSourceInventory({inventory,store,sourceRoot,expected
     indexed++;
    }else unavailable++;
    scanned++;
-   if(scanned>expectedManifest.expectedFileCount)throw Error('MANIFEST_COUNT_EXCEEDED');
+   if(scanned>manifest.expectedFileCount)throw Error('MANIFEST_COUNT_EXCEEDED');
    batch.push(entry);
    if(batch.length===batchSize)flush();
   }
   if(!await capacity())return report('PAUSED');
   flush();
-  const sealed=inventory.seal(expectedManifest);
+  const sealed=inventory.seal(manifest);
   return report(unavailable?'INVENTORY_SEALED_WITH_GAPS':'INVENTORY_SEALED',{...sealed});
  }catch(e){if(e?.message==='SOURCE_CAPTURE_PAUSED')return report('PAUSED');return report('INCOMPLETE',{reason:String(e?.message??e).slice(0,256)});}
 }
