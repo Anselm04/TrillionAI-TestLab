@@ -51,7 +51,7 @@ export class HcieMapQueue {
   if(!integer(leaseMs,100,300000))throw Error('Invalid lease');
   return this.#tx(()=>{
    const now=Date.now();
-   this.#db.prepare("UPDATE map_tasks SET state=CASE WHEN attempt>=? THEN 'INCOMPLETE' ELSE 'QUEUED' END,token=NULL,until_ms=NULL WHERE state='LEASED' AND until_ms<=?").run(this.#attempts,now);
+   this.#db.prepare("UPDATE map_tasks SET state=CASE WHEN attempt>=? THEN 'INCOMPLETE' ELSE 'QUEUED' END,token=NULL,until_ms=NULL WHERE seq IN (SELECT seq FROM map_tasks WHERE state='LEASED' AND until_ms<=? ORDER BY until_ms,seq LIMIT 256)").run(this.#attempts,now);
    const token=randomUUID(),expiresAt=now+leaseMs;
    const row=this.#db.prepare("UPDATE map_tasks SET state='LEASED',attempt=attempt+1,token=?,until_ms=? WHERE seq=(SELECT seq FROM map_tasks WHERE state='QUEUED' ORDER BY seq LIMIT 1) RETURNING id,descriptor,attempt").get(token,expiresAt);
    return row?{taskId:row.id,...JSON.parse(row.descriptor),attempt:row.attempt,token,expiresAt}:null;
