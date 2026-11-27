@@ -12,18 +12,22 @@ function payload({runId,deviceId,buildSha256,flowSha256,manifestSha256,journeySt
  return {schemaVersion:1,runId,deviceId,buildSha256,flowSha256,manifestSha256,journeyStatus,workerKeyId};
 }
 export async function attestMobileRun({report,store,privateKey}){
+ report=structuredClone(report);
  const m=report?.evidenceManifest;
- if(!m||!await store.verify(m)||m.deviceId!==report.deviceId||m.buildSha256!==report.buildSha256||m.flowSha256!==report.flowSha256)throw new Error('Evidence not verified');
+ if(!m||!await store.verify(structuredClone(m))||m.deviceId!==report.deviceId||m.buildSha256!==report.buildSha256||m.flowSha256!==report.flowSha256)throw new Error('Evidence not verified');
  const body=payload({...m,manifestSha256:hash(m),journeyStatus:report.status,workerKeyId:keyId(privateKey)});
  return {body,signature:sign(null,Buffer.from(JSON.stringify(body)),privateKey).toString('base64')};
 }
 export async function reviewMobileRun({attestation,manifest,store,workerPublicKey,reviewerPrivateKey,expected}){
+ attestation=structuredClone(attestation);
+ manifest=structuredClone(manifest);
+ expected=structuredClone(expected);
  const body=payload(attestation.body);
  if(JSON.stringify(body)!==JSON.stringify(attestation.body)||keyId(workerPublicKey)!==body.workerKeyId||!verify(null,Buffer.from(JSON.stringify(body)),workerPublicKey,Buffer.from(attestation.signature,'base64')))throw new Error('Invalid worker signature');
  const reviewerKeyId=keyId(reviewerPrivateKey);
  if(reviewerKeyId===body.workerKeyId)throw new Error('Independent key required');
  if(!expected||expected.runId!==body.runId||expected.deviceId!==body.deviceId||expected.buildSha256!==body.buildSha256||expected.flowSha256!==body.flowSha256)throw new Error('Unexpected run context');
- if(hash(manifest)!==body.manifestSha256||manifest.runId!==body.runId||manifest.deviceId!==body.deviceId||manifest.buildSha256!==body.buildSha256||manifest.flowSha256!==body.flowSha256||!await store.verify(manifest))throw new Error('Artifact verification failed');
+ if(hash(manifest)!==body.manifestSha256||manifest.runId!==body.runId||manifest.deviceId!==body.deviceId||manifest.buildSha256!==body.buildSha256||manifest.flowSha256!==body.flowSha256||!await store.verify(structuredClone(manifest)))throw new Error('Artifact verification failed');
  const kinds=new Set(manifest.artifacts.map(x=>x.kind));
  const decision=body.journeyStatus==='COMMAND_SUCCEEDED'&&kinds.has('log')&&kinds.has('screenshot')?'EVIDENCE_ACCEPTED':'BLOCKED';
  const review={schemaVersion:1,attestationSha256:hash(attestation),reviewerKeyId,decision,deploymentAuthorized:false,productionReady:false};
