@@ -58,14 +58,15 @@ export class HcieSourceStore{
 }
 // Streaming inventory of an operator-prepared tree, excluding no files
 // silently. Unsupported paths are surfaced without fabricated source digests.
-export async function* snapshotSource({sourceRoot,store,maxFiles=100000,maxFileBytes=67108864,maxTotalBytes=2147483648,maxDepth=64,signal}={}){
- if(typeof sourceRoot!=='string'||!isAbsolute(sourceRoot)||typeof store?.capture!=='function'||typeof store?.root!=='function'||!integer(maxFiles,1,10000000)||!integer(maxFileBytes,0,2147483648)||!integer(maxTotalBytes,0,Number.MAX_SAFE_INTEGER)||!integer(maxDepth,1,128))throw Error('Invalid snapshot limits');
+export async function* snapshotSource({sourceRoot,store,maxFiles=100000,maxDirectories=100000,maxFileBytes=67108864,maxTotalBytes=2147483648,maxDepth=64,signal}={}){
+ if(typeof sourceRoot!=='string'||!isAbsolute(sourceRoot)||typeof store?.capture!=='function'||typeof store?.root!=='function'||!integer(maxFiles,1,10000000)||!integer(maxDirectories,1,10000000)||!integer(maxFileBytes,0,2147483648)||!integer(maxTotalBytes,0,Number.MAX_SAFE_INTEGER)||!integer(maxDepth,1,128))throw Error('Invalid snapshot limits');
  const root=resolve(sourceRoot),storage=await store.root();
  if(await realpath(root)!==root||!(await lstat(root)).isDirectory()||root===storage||inside(root,storage)||inside(storage,root))throw Error('Separate canonical source and storage roots required');
- let files=0,total=0;
+ let files=0,total=0,directories=0;
  async function* walk(dir,depth){
   if(signal?.aborted)throw Error('CANCELLED');
   if(depth>maxDepth)throw Error('DEPTH_LIMIT');
+  if(++directories>maxDirectories)throw Error('DIRECTORY_COUNT_LIMIT');
   if(await realpath(dir)!==dir)throw Error('DIRECTORY_CHANGED');
   for await(const entry of await opendir(dir)){
    if(signal?.aborted)throw Error('CANCELLED');
