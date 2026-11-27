@@ -163,8 +163,36 @@ class ReportComparison {
   }
 }
 
+class QualificationTemplate {
+  const QualificationTemplate(this.requirements);
+  final List<Map<String, dynamic>> requirements;
+  factory QualificationTemplate.parse(Object? value) {
+    if (value is! Map<String, dynamic> || value['schemaVersion'] != 1 ||
+        value['product'] != 'AppForge' || value['version'] != 1 ||
+        value['scope'] != 'INITIAL_FUNCTIONAL_JOURNEY' ||
+        value['productionReady'] != false || value['deploymentAuthorized'] != false ||
+        value['requirements'] is! List) {
+      throw const FormatException('Invalid qualification template');
+    }
+    final rows = value['requirements'] as List;
+    final expected = {for (var i = 1; i <= 19; i++) 'AF-${i.toString().padLeft(3, '0')}'};
+    final requirements = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      if (row is! Map<String, dynamic> || row['id'] is! String ||
+          !expected.remove(row['id']) || row['title'] is! String ||
+          (row['title'] as String).trim().isEmpty || row['status'] != 'NOT_EXECUTED') {
+        throw const FormatException('Invalid qualification requirement');
+      }
+      requirements.add(Map<String, dynamic>.unmodifiable(row));
+    }
+    if (expected.isNotEmpty) throw const FormatException('Incomplete qualification template');
+    return QualificationTemplate(List<Map<String, dynamic>>.unmodifiable(requirements));
+  }
+}
+
 class TestLabHome extends StatefulWidget {
-  const TestLabHome({super.key});
+  const TestLabHome({super.key, this.httpClient});
+  final http.Client? httpClient;
   @override
   State<TestLabHome> createState() => _TestLabHomeState();
 }
@@ -176,7 +204,7 @@ class _TestLabHomeState extends State<TestLabHome> {
   final reportId = TextEditingController();
   final beforeId = TextEditingController();
   final afterId = TextEditingController();
-  final client = http.Client();
+  late final client = widget.httpClient ?? http.Client();
   bool running = false;
   String result = 'No test runs yet';
   RunReportSnapshot? runReport;
@@ -188,6 +216,8 @@ class _TestLabHomeState extends State<TestLabHome> {
   String? capabilityError;
   ReportComparison? comparison;
   String? comparisonError;
+  QualificationTemplate? qualification;
+  String? qualificationError;
 
   Future<Object?> request(String path, {Map<String, String>? body}) async {
     final uri = apiUri(endpoint.text, path);
@@ -282,9 +312,23 @@ class _TestLabHomeState extends State<TestLabHome> {
     }
   }
 
+  Future<void> inspectQualification() async {
+    if (running) return;
+    setState(() { running = true; qualification = null; qualificationError = null; });
+    try {
+      final snapshot = QualificationTemplate.parse(await request('/qualification/templates/appforge'));
+      if (mounted) setState(() => qualification = snapshot);
+    } catch (_) {
+      if (mounted) setState(() => qualificationError = 'Qualification template unavailable or invalid.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
   @override
   void dispose() {
-    client.close(); endpoint.dispose(); token.dispose(); project.dispose(); reportId.dispose(); beforeId.dispose(); afterId.dispose();
+    if (widget.httpClient == null) client.close();
+    endpoint.dispose(); token.dispose(); project.dispose(); reportId.dispose(); beforeId.dispose(); afterId.dispose();
     super.dispose();
   }
 
@@ -333,6 +377,17 @@ class _TestLabHomeState extends State<TestLabHome> {
           Text('Partial coverage domains: ${capabilities!.partial} / ${capabilities!.domains.length}'),
           for (final domain in capabilities!.domains)
             ListTile(title: Text(domain['label'] as String), subtitle: Text('${domain['implementationStatus']} · NOT_EXECUTED')),
+        ],
+        const Divider(height: 32),
+        Text('AppForge qualification planning', style: Theme.of(context).textTheme.headlineSmall),
+        OutlinedButton.icon(onPressed: running ? null : inspectQualification, icon: const Icon(Icons.checklist), label: const Text('View AppForge qualification scope')),
+        if (qualificationError != null) Text(qualificationError!),
+        if (qualification != null) ...[
+          Text('Requirements planned: ${qualification!.requirements.length}'),
+          const Text('No AppForge tests executed by this view.'),
+          const Text('Initial functional scope only; the submitted revision and complete coverage remain to be established.'),
+          for (final requirement in qualification!.requirements)
+            ListTile(title: Text('${requirement['id']} — ${requirement['title']}'), subtitle: const Text('NOT_EXECUTED')),
         ],
         const Divider(height: 32),
         TextField(controller: project, enabled: !running, decoration: const InputDecoration(labelText: 'Workspace project directory')),

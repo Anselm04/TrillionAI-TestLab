@@ -1,4 +1,8 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:trillionai_testlab/main.dart';
 
 void main() {
@@ -81,5 +85,44 @@ void main() {
     expect(() => ReportComparison.parse(data, beforeId: after, afterId: before), throwsFormatException);
     expect(() => ReportComparison.parse({...data, 'productCertified': true}, beforeId: before, afterId: after), throwsFormatException);
     expect(() => ReportComparison.parse({...data, 'status': 'OBSERVATIONS_MATCH'}, beforeId: before, afterId: after), throwsFormatException);
+  });
+  Map<String, dynamic> qualificationFixture() => {
+    'schemaVersion': 1, 'product': 'AppForge', 'version': 1,
+    'scope': 'INITIAL_FUNCTIONAL_JOURNEY',
+    'productionReady': false, 'deploymentAuthorized': false,
+    'requirements': List.generate(19, (i) => {
+      'id': 'AF-${(i + 1).toString().padLeft(3, '0')}',
+      'title': 'Fixture requirement ${i + 1}', 'status': 'NOT_EXECUTED',
+    }),
+  };
+  test('qualification view rejects omissions, duplicate IDs and executed claims', () {
+    final data = qualificationFixture();
+    expect(QualificationTemplate.parse(data).requirements.length, 19);
+    final rows = data['requirements'] as List;
+    expect(() => QualificationTemplate.parse({...data, 'requirements': rows.skip(1).toList()}), throwsFormatException);
+    expect(() => QualificationTemplate.parse({...data, 'requirements': [rows.first, ...rows.take(18)]}), throwsFormatException);
+    expect(() => QualificationTemplate.parse({...data, 'requirements': [
+      {...(rows.first as Map<String, dynamic>), 'status': 'PASSED'}, ...rows.skip(1)
+    ]}), throwsFormatException);
+    expect(() => QualificationTemplate.parse({...data, 'deploymentAuthorized': true}), throwsFormatException);
+  });
+  testWidgets('operator can retrieve the planned AppForge checklist without executing tests', (tester) async {
+    var requests = 0;
+    final client = MockClient((request) async {
+      requests++;
+      expect(request.method, 'GET');
+      expect(request.url.path, '/qualification/templates/appforge');
+      return http.Response(jsonEncode(qualificationFixture()), 200);
+    });
+    await tester.pumpWidget(MaterialApp(home: TestLabHome(httpClient: client)));
+    final button = find.text('View AppForge qualification scope');
+    await tester.scrollUntilVisible(button, 200, scrollable: find.byType(Scrollable).first);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(requests, 1);
+    await tester.scrollUntilVisible(find.text('Requirements planned: 19'), 100, scrollable: find.byType(Scrollable).first);
+    expect(find.text('Requirements planned: 19'), findsOneWidget);
+    expect(find.text('No AppForge tests executed by this view.'), findsOneWidget);
+    client.close();
   });
 }
