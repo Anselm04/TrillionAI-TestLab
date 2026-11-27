@@ -32,7 +32,7 @@ export async function assessAccessibility({revisionSha256,environmentId,journeyI
   else if(!s.focusVisible)findings.push({rule:'FOCUS_INDICATOR_NOT_OBSERVED',stepId:s.id,wcag:'2.4.7'});
  }
  const gaps=[];
- if(!snapshot.complete)gaps.push('PARTIAL_SNAPSHOT');
+ if(!evidence.complete)gaps.push('PARTIAL_SNAPSHOT');
  if(!nodes.length)gaps.push('NO_NODES');
  if(!steps.length)gaps.push('NO_KEYBOARD_JOURNEY');
  return report(findings.length?'VERIFIED_RULE_FINDINGS':gaps.length?'INCOMPLETE':'DECLARED_RULES_PASSED',{findings,gaps,nodeCount:nodes.length,keyboardStepCount:steps.length});
