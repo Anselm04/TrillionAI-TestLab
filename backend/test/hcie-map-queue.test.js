@@ -56,3 +56,15 @@ test('direct completion without bound review evidence is rejected',async t=>{
  assert.equal(q.page().entries[0].result.reviewEvidence.reviewerId,'fixture-reviewer');
  }finally{q.close();}
 });
+
+test('capacity deferral fences the old lease and respects retry budget',async t=>{
+ const {q,input}=await fixture(t,{maxAttempts:2});try{
+ q.enqueue({...input,limit:1});const first=q.claim();
+ assert.equal(q.defer(first),true);assert.equal(q.defer(first),false);
+ assert.equal(q.complete({...first,result:result(first)}),false);
+ assert.equal(q.page().entries[0].state,'QUEUED');
+ const next=q.claim();assert.equal(next.taskId,first.taskId);assert.equal(next.attempt,2);
+ assert.equal(q.defer(next),true);assert.equal(q.page().entries[0].state,'INCOMPLETE');
+ assert.equal(q.claim(),null);
+ }finally{q.close();}
+});
