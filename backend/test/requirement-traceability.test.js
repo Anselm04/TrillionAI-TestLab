@@ -47,3 +47,17 @@ test('mobile traceability requires signed evidence and exact immutable test bind
  const forged=structuredClone(observation);forged.evidence.review.signature='invalid';
  assert.equal((await evaluateTraceability({plan,observations:[forged],verifyObservation})).counts.UNVERIFIED,1);
 });
+
+test('dense traceability mappings preserve every linked result and canonical order',async()=>{
+ const requirements=Array.from({length:500},(_,i)=>req('r'+String(i).padStart(3,'0')));
+ const ids=requirements.map(r=>r.id);
+ const tests=Array.from({length:500},(_,i)=>check('t'+String(i).padStart(3,'0'),ids)).reverse();
+ const plan=createTraceabilityPlan({revisionSha256,requirements,tests});
+ const report=await evaluateTraceability({plan,observations:[obs('t000'),obs('t499','FAILED')],verifyObservation:async()=>true});
+ assert.equal(report.counts.FAILED,500);
+ for(const requirement of report.requirements){
+  assert.equal(requirement.checks.length,500);
+  assert.deepEqual(requirement.checks,report.tests);
+ }
+ assert.equal(report.planSha256,plan.planSha256);
+});
