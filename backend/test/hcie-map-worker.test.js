@@ -60,3 +60,15 @@ test('missing or identical reviewer fails before claim',async t=>{
  await assert.rejects(runMapWorkerOnce({...f,analyze,review:analyze}),/configuration/);
  assert.equal(f.queue.page().entries[0].state,'QUEUED');
 });
+
+test('transient capacity refusal after claim or analysis defers rather than finalizes',async t=>{
+ const f=await fixture(t);let calls=0,analyses=0;
+ const analyze=async()=>{analyses++;return {status:'ANALYZED',summary:'fixture'};};
+ assert.equal((await runMapWorkerOnce({...f,analyze,checkCapacity:async()=>++calls<2})).status,'PAUSED');
+ assert.equal(analyses,0);assert.equal(f.queue.page().entries[0].state,'QUEUED');
+ calls=0;
+ assert.equal((await runMapWorkerOnce({...f,analyze,checkCapacity:async()=>++calls<3})).status,'PAUSED');
+ assert.equal(analyses,1);assert.equal(f.queue.page().entries[0].state,'QUEUED');
+ assert.equal((await runMapWorkerOnce({...f,analyze})).status,'ANALYZED');
+ assert.equal(f.queue.page().entries[0].attempt,3);
+});
