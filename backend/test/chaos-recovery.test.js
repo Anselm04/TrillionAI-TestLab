@@ -25,3 +25,19 @@ test('scope, capacity and independent verification are mandatory',async()=>{
  const controller=new AbortController();controller.abort();
  assert.equal((await qualifyRecovery({...a,signal:controller.signal})).reason,'CANCELLED');
 });
+
+test('recovery exercise cannot rewrite the captured baseline',async()=>{
+ const a=args(),original={...baseline};
+ a.adapter.baseline=async()=>original;
+ a.adapter.exercise=async()=>{original.recordCount=0;original.stateSha256='c'.repeat(64);return {...after,recordCount:9,lostRecords:1};};
+ const r=await qualifyRecovery(a);
+ assert.equal(r.status,'VERIFIED_FAILURE');
+ assert.deepEqual(r.observation.baseline,baseline);
+ assert.deepEqual(r.violations,['RECORD_LOSS_EXCEEDED']);
+});
+test('cancellation during initial capacity check prevents baseline execution',async()=>{
+ const a=args(),controller=new AbortController();
+ a.adapter.baseline=async()=>assert.fail('baseline after cancellation');
+ const r=await qualifyRecovery({...a,signal:controller.signal,checkCapacity:async()=>{controller.abort();return true;}});
+ assert.equal(r.reason,'CANCELLED');
+});
