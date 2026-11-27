@@ -23,3 +23,16 @@ test('wrong context and unknown focus target rejected',async()=>{
  await assert.rejects(assessAccessibility({...args,snapshot:{...snapshot,environmentId:'other'}}));
  await assert.rejects(assessAccessibility({...args,snapshot:{...snapshot,keyboardSteps:[{...step,actualNodeId:'unknown'}]}}));
 });
+
+test('verified accessibility completeness cannot change during independent review',async()=>{
+ const partial={...snapshot,complete:false};
+ const r=await assessAccessibility({...args,snapshot:partial,verifyEvidence:async evidence=>{
+  assert.equal(evidence.complete,false);
+  partial.complete=true;
+  evidence.complete=true;
+  return true;
+ }});
+ assert.equal(r.status,'INCOMPLETE');
+ assert.deepEqual(r.gaps,['PARTIAL_SNAPSHOT']);
+ assert.equal(r.productionReady,false);
+});
