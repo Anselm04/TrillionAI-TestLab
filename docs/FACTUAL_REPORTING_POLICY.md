@@ -24,6 +24,8 @@ The authenticated read-only `GET /runs/compare/{beforeId}/{afterId}` endpoint co
 ## Integrity
 A checksum detects changes to a report given the original trusted checksum. A standalone checksum does NOT prove origin, prevent a privileged operator from rewriting history, or replace a signed attestation. Signed immutable evidence will require a dedicated later implementation and threat-model review.
 
+The signed mobile release-evidence assessment evaluates a detached policy and evidence snapshot, hashes that policy before asynchronous artifact verification, and passes a separate manifest copy to the verifier. Successful verification means the stated evidence checks passed for the supplied context; it is not production approval or proof that physical devices were used. The offline cross-platform fixture remains synthetic.
+
 Local report publication writes and synchronizes a private staging file before atomically linking it at the final report ID, with no replacement of an existing report. Readers never see partial staged content. An interrupted process may leave an ignored temporary file; this is local Linux filesystem durability, not replicated or cryptographically immutable storage.
 
 Local report reads and writes are bounded to 4 MiB per JSON file. Oversized records are not silently truncated or treated as valid evidence; stored oversized files are unavailable through the report API. This is a per-record bound, not a total storage quota or verified multi-tenant capacity limit. A bounded local fixture qualifies 128 independent report publications with four concurrent writes at a time and checks every retained outcome and checksum; it does not measure customer workload throughput.
