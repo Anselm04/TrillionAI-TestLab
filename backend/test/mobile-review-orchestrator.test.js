@@ -8,7 +8,7 @@ const worker=generateKeyPairSync('ed25519'),reviewer=generateKeyPairSync('ed2551
 function fixture(){
  const input={reviewChallengeId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',deviceId:'device-1',packageName:'com.test.app',apkSha256:'a'.repeat(64),journey:{id:'welcome',packageName:'com.test.app',steps:[{action:'launch'},{action:'assertVisible',text:'Welcome'},{action:'stop'}]}};
  const m={reviewChallengeId:input.reviewChallengeId,runId:'run-1',deviceId:input.deviceId,buildSha256:input.apkSha256,flowSha256:createHash('sha256').update(compileMaestro(input.journey)).digest('hex'),artifacts:[{kind:'log'},{kind:'screenshot'}]};
- const store={verify:async manifest=>manifest===m};
+ const store={verify:async manifest=>JSON.stringify(manifest)===JSON.stringify(m)};
  const report={status:'SMOKE_OBSERVED',leaseReleased:true,cleanupVerified:true,journeyReport:{...m,journeyId:'welcome',status:'COMMAND_SUCCEEDED',evidenceStatus:'CHECKSUM_VERIFIED',evidenceManifest:m}};
  const config={supervisor:{smoke:async()=>report},store,workerPrivateKey:worker.privateKey,reviewerPublicKey:reviewer.publicKey,review:args=>reviewMobileRun({...args,store,workerPublicKey:worker.publicKey,reviewerPrivateKey:reviewer.privateKey})};
  return {input,report,config};
