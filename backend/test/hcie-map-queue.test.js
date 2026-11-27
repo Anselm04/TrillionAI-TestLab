@@ -1,3 +1,4 @@
+import {DatabaseSync} from 'node:sqlite';
 import {observationDigest} from '../src/hcie-review-evidence.js';
 const reviewed=(task,result)=>({...result,reviewEvidence:{accepted:true,reviewerId:'fixture-reviewer',reviewerDefinitionSha256:'d'.repeat(64),observationSha256:observationDigest(task,result),chunkSha256:task.chunkSha256}});
 import {test} from 'node:test';
@@ -10,9 +11,9 @@ import {HcieSourceStore} from '../src/hcie-source-store.js';
 import {HcieChunkStore} from '../src/hcie-chunk-store.js';
 import {HcieMapQueue} from '../src/hcie-map-queue.js';
 const revisionSha256='a'.repeat(64),policySha256='b'.repeat(64);
-async function fixture(t,extra={}){
+async function fixture(t,extra={},data='abcdefgh'){
  const root=await mkdtemp(join(tmpdir(),'hcie-map-'));t.after(()=>rm(root,{recursive:true,force:true}));
- const file=join(root,'input');await writeFile(file,'abcdefgh');
+ const file=join(root,'input');await writeFile(file,data);
  const store=new HcieSourceStore(join(root,'objects')),entry={...await store.capture(file),path:'src/input',status:'INDEXED'};
  const chunks=new HcieChunkStore(join(root,'chunks.sqlite'),{revisionSha256});t.after(()=>chunks.close());
  const manifest=await chunks.index({store,entry,maxChunkBytes:4,checkCapacity:async()=>true});
@@ -66,5 +67,23 @@ test('capacity deferral fences the old lease and respects retry budget',async t=
  const next=q.claim();assert.equal(next.taskId,first.taskId);assert.equal(next.attempt,2);
  assert.equal(q.defer(next),true);assert.equal(q.page().entries[0].state,'INCOMPLETE');
  assert.equal(q.claim(),null);
+ }finally{q.close();}
+});
+
+test('expired lease recovery processes bounded batches without losing tasks',async t=>{
+ const {q,input,db}=await fixture(t,{maxAttempts:1},'abcd'.repeat(257));
+ try{
+  const first=q.enqueue({...input,limit:256});
+  q.enqueue({...input,after:first.nextCursor});
+  for(let i=0;i<257;i++)assert.ok(q.claim({leaseMs:300000}));
+  // Deterministic expiry fixture, no wall-clock sleep.
+  const sql=new DatabaseSync(db);
+  try{sql.exec("UPDATE map_tasks SET until_ms=0 WHERE state='LEASED'");}finally{sql.close();}
+  assert.equal(q.claim(),null);
+  const page=q.page({limit:256});
+  assert.ok(page.entries.every(e=>e.state==='INCOMPLETE'));
+  assert.equal(q.page({after:page.nextCursor}).entries[0].state,'LEASED');
+  assert.equal(q.claim(),null);
+  assert.equal(q.page({after:page.nextCursor}).entries[0].state,'INCOMPLETE');
  }finally{q.close();}
 });
