@@ -11,7 +11,7 @@ export async function ingestSourceInventory({inventory,store,sourceRoot,expected
  const flush=()=>{if(batch.length){added+=inventory.append(batch).added;batch.length=0;}};
  if(!await capacity())return report('PAUSED');
  try{
-  for await(const entry of snapshotSource({...limits,sourceRoot,store,signal})){
+  for await(const entry of snapshotSource({...limits,sourceRoot,store,signal,checkCaptureCapacity:capacity})){
    if(!await capacity())return report('PAUSED');
    if(entry.status==='INDEXED'){
     if(!await store.verify(entry))throw Error('SOURCE_OBJECT_UNVERIFIED');
@@ -26,5 +26,5 @@ export async function ingestSourceInventory({inventory,store,sourceRoot,expected
   flush();
   const sealed=inventory.seal(expectedManifest);
   return report(unavailable?'INVENTORY_SEALED_WITH_GAPS':'INVENTORY_SEALED',{...sealed});
- }catch(e){return report('INCOMPLETE',{reason:String(e?.message??e).slice(0,256)});}
+ }catch(e){if(e?.message==='SOURCE_CAPTURE_PAUSED')return report('PAUSED');return report('INCOMPLETE',{reason:String(e?.message??e).slice(0,256)});}
 }
