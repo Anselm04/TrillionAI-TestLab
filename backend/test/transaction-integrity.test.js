@@ -23,3 +23,9 @@ test('aborted increments do not count toward committed state',async()=>{
  const history=[op('a',0,1,1),op('b',2,3,null,'ABORTED')];
  assert.equal((await verifyIncrementHistory({...args,final:1,history})).status,'DECLARED_INCREMENT_MODEL_PASSED');
 });
+
+test('reused operation evidence cannot establish an increment history verdict',async()=>{
+ const history=[op('a',0,1,1),{...op('b',2,3,2),evidenceId:'e-a'}];
+ await assert.rejects(verifyIncrementHistory({...args,history,verifyEvidence:async()=>assert.fail('duplicate evidence reached verifier')}),/Invalid operation/);
+ assert.equal((await verifyIncrementHistory({...args,history:[op('a',0,1,1),op('b',2,3,2)]})).status,'DECLARED_INCREMENT_MODEL_PASSED');
+});
