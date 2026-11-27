@@ -23,3 +23,18 @@ test('export attachments and verify evidence; missing video blocks',async t=>{
  const good=await execute(context);assert.equal(good.evidenceStatus,'CHECKSUM_VERIFIED');assert.equal(await store.verify(good.evidenceManifest),true);
  includeVideo=false;assert.equal((await execute(context)).status,'BLOCKED');
 });
+
+test('oversized attachment directory blocks before evidence capture',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'ios-media-budget-')));t.after(()=>rm(root,{recursive:true,force:true}));
+ const resultBundle=join(root,'test.xcresult');await mkdir(resultBundle);
+ const context={deviceId:'iphone-1',artifactSha256:'a'.repeat(64)};
+ const report={...context,status:'COMMAND_SUCCEEDED',testRunSha256:'b'.repeat(64),resultBundle};
+ const execute=createIosEvidenceExecutor({execute:async()=>report,evidenceRoot:root,store:{capture:async()=>assert.fail('unexpected capture'),verify:async()=>assert.fail('unexpected verification')},runner:async(_cmd,args)=>{
+  for(let i=0;i<1001;i++)await writeFile(join(args.at(-1),'attachment-'+i),'');
+  return {exitCode:0};
+ }});
+ const r=await execute(context);
+ assert.equal(r.status,'BLOCKED');
+ assert.equal(r.reason,'Too many attachments');
+ assert.equal(r.deploymentAuthorized,false);
+});
