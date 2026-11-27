@@ -49,8 +49,10 @@ export async function evaluateTraceability({plan,observations,verifyObservation}
   results.push({testId:t.id,status,reason,evidenceId});
  }
  const byId=new Map(results.map(r=>[r.testId,r]));
+ const linked=new Map(canonical.requirements.map(r=>[r.id,[]]));
+ for(const t of canonical.tests)for(const requirementId of t.requirementIds)linked.get(requirementId).push(byId.get(t.id));
  const requirements=canonical.requirements.map(r=>{
-  const checks=canonical.tests.filter(t=>t.requirementIds.includes(r.id)).map(t=>byId.get(t.id));
+  const checks=linked.get(r.id);
   const status=checks.some(c=>c.status==='FAILED')?'FAILED':!checks.length||checks.every(c=>c.status==='NOT_EXECUTED')?'NOT_TESTED':checks.every(c=>c.status==='PASSED')?'PASSED':checks.some(c=>c.status==='PASSED')?'PARTIALLY_TESTED':'UNVERIFIED';
   return {...r,status,checks};
  });
