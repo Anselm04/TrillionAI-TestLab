@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {writeFile} from 'node:fs/promises';
+import {writeFile,mkdir,symlink} from 'node:fs/promises';
 import {discoverIos,parseIosInventory} from '../src/ios-inventory.js';
 const device={hardwareProperties:{platform:'iOS',udid:'00008101-ABCDEF',productType:'iPhone15,2'},connectionProperties:{pairingState:'paired'}};
 const fixture={result:{devices:[device]}};
@@ -25,4 +25,15 @@ test('modern properties schema excludes simulators and preserves conservative re
  const result=parseIosInventory({result:{devices:[modern,simulator]}});
  assert.equal(result.length,1);assert.equal(result[0].id,hardware.udid);assert.equal(result[0].available,false);
  assert.equal(result[0].kind,'unverified');
+});
+
+test('discovery rejects oversized, nonregular and symlink inventory output',async()=>{
+ for(const create of [
+  path=>writeFile(path,Buffer.alloc(2097153)),
+  path=>mkdir(path),
+  path=>symlink('/dev/null',path),
+ ]){
+  const result=await discoverIos({hostPlatform:'darwin',runner:async(_command,args)=>{await create(args[4]);return {exitCode:0};}});
+  assert.deepEqual(result,{status:'INFRASTRUCTURE_ERROR',devices:[]});
+ }
 });
