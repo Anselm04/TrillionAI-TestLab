@@ -1,4 +1,4 @@
-import {mkdtemp,readdir,lstat,realpath,open,rm} from 'node:fs/promises';
+import {mkdtemp,opendir,lstat,realpath,open,rm} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import {join,isAbsolute,relative,sep} from 'node:path';
 import {runProcess} from './core.js';
@@ -30,7 +30,11 @@ export function createIosEvidenceExecutor({execute,store,evidenceRoot,runner=run
    dir=await mkdtemp(join(root,'ios-attachments-'));
    const r=await runner('xcrun',['xcresulttool','export','attachments','--path',result,'--output-path',dir],{timeoutMs:30000,outputLimit:64000});
    if(!ok(r))return failed('Attachment export failed');
-   const files=await readdir(dir);if(files.length>1000)return failed('Too many attachments');
+   const files=[];
+   for await(const entry of await opendir(dir)){
+    if(files.length>=1000)return failed('Too many attachments');
+    files.push(entry.name);
+   }
    const pick=ext=>files.filter(n=>n.toLowerCase().endsWith(ext)).sort()[0];
    const png=pick('.png'),mp4=pick('.mp4');
    if(!png||(requireVideo&&!mp4))return failed('Required recorded media missing');
