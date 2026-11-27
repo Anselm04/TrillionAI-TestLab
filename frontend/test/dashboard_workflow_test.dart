@@ -74,7 +74,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('ios-fixture'), findsOneWidget);
     expect(find.text('android-fixture'), findsNothing);
-    await tester.ensureVisible(refresh);
+    await tester.scrollUntilVisible(refresh, -180, scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
     await tester.tap(refresh);
     await tester.pumpAndSettle();
     expect(find.text('Inventory unavailable or unauthorized.'), findsOneWidget);
