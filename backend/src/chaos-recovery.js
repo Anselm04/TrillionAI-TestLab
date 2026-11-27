@@ -20,7 +20,8 @@ export async function qualifyRecovery({scope,scenario,adapter,verifyObservation,
  let observation,reason,started=false,clean=false;
  try{
  if(await checkCapacity()!==true)return report('INCOMPLETE',{reason:'RESOURCE_LIMIT'});
- const baseline=await adapter.baseline(structuredClone(context),signal);
+ if(signal?.aborted)return report('INCOMPLETE',{reason:'CANCELLED'});
+ const baseline=structuredClone(await adapter.baseline(structuredClone(context),signal));
  if(!valid(baseline?.stateSha256,sha)||!Number.isSafeInteger(baseline.recordCount)||baseline.recordCount<0)throw Error('Invalid baseline');
  if(signal?.aborted)return report('INCOMPLETE',{reason:'CANCELLED'});
  if(await checkCapacity()!==true)return report('INCOMPLETE',{reason:'RESOURCE_LIMIT'});
