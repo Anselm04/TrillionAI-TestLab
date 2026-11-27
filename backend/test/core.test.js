@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, symlink, readFile, writeFile, readdir, rm } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveProject, executeRun, readStoredReport, persistReport, MAX_REPORT_BYTES } from '../src/core.js';
-import { verifyReportChecksum, sealReport } from '../src/evidence.js';
+import { verifyReportChecksum, sealReport, makeObservation } from '../src/evidence.js';
 import { randomUUID } from 'node:crypto';
 
 test('reject traversal and invalid names', async () => {
@@ -127,4 +127,18 @@ test('bounded concurrent report publication retains all 128 independent outcomes
   for(const report of results)assert.deepEqual(await readStoredReport(reports,report.id),report);
   assert.equal(results.filter(r=>r.status==='PASSED').length,64);
   assert.equal(results.filter(r=>r.status==='FAILED').length,64);
+});
+
+test('abandoned private staging data cannot be mistaken for a completed report',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'testlab-report-recovery-'));
+ t.after(()=>rm(root,{recursive:true,force:true}));
+ const id=randomUUID();
+ const observation=makeObservation({checkId:'unit',command:'node --test',runnerResult:{exitCode:1},environment:'fixture'});
+ const report=sealReport({schemaVersion:1,id,project:'fixture',status:'FAILED',observations:[observation],productionReady:false});
+ const abandoned=join(root,'.'+id+'.'+randomUUID()+'.tmp');
+ await writeFile(abandoned,'unfinished fixture data');
+ assert.equal(await readStoredReport(root,id),null);
+ await persistReport(root,report);
+ assert.deepEqual(await readStoredReport(root,id),report);
+ assert.equal(await readFile(abandoned,'utf8'),'unfinished fixture data');
 });
