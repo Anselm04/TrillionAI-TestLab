@@ -14,9 +14,9 @@ export async function dispatchRetestCycle({projectId,journal,verifyStoredObserva
   const matching=analysis.groups.filter(g=>g.status==='FAILED'&&g.testId===r.testId&&g.environmentId===r.environmentId&&g.definitionSha256===r.definitionSha256&&g.revisionSha256===r.revisionSha256);
   for(const g of matching)for(const runId of g.evidenceIds)if(!rejected.has(runId))candidates.set(runId,r);
  }
- let attempted=0;
+ let attempted=0,interrupted=false;
  for(const [parentRunId,r] of candidates){
-  if(attempted>=maxDispatch||signal?.aborted||await checkCapacity()!==true||signal?.aborted)break;
+  if(attempted>=maxDispatch||signal?.aborted||await checkCapacity()!==true||signal?.aborted){interrupted=true;break;}
   const entry=journal.get(parentRunId),o=entry?.result?.observation;
   if(entry?.state!=='VERIFIED'||entry.integrity!==true||o?.status!=='FAILED'||o.testId!==r.testId||o.environmentId!==r.environmentId||entry.definitionSha256!==r.definitionSha256||entry.revisionSha256!==r.revisionSha256)continue;
   attempted++;
@@ -26,7 +26,7 @@ export async function dispatchRetestCycle({projectId,journal,verifyStoredObserva
   if(child?.state!=='QUEUED'){events.push({parentRunId,runId:scheduled.runId,status:'ALREADY_PROCESSED'});continue;}
   const result=await journal.runNext({checkCapacity,signal,expectedRunId:scheduled.runId});
   events.push({parentRunId,runId:scheduled.runId,status:result?.state??result?.status??'UNKNOWN',outcome:result?.state==='VERIFIED'?result.result?.observation?.status??null:null});
-  if(result?.status==='PAUSED'||result?.status==='IDLE_OR_BUSY'||result?.state==='BLOCKED')break;
+  if(result?.status==='PAUSED'||result?.status==='IDLE_OR_BUSY'||result?.state==='BLOCKED'){interrupted=true;break;}
  }
- return report('CYCLE_FINISHED',{nextCursor:analysis.nextCursor,hasMore:analysis.hasMore,historyStatus:analysis.status,attempted,candidateCount:candidates.size});
+ return report(interrupted?'CYCLE_INCOMPLETE':'CYCLE_FINISHED',{nextCursor:interrupted?after:analysis.nextCursor,hasMore:interrupted||analysis.hasMore,historyStatus:analysis.status,attempted,candidateCount:candidates.size});
 }

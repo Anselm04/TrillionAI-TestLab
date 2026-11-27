@@ -29,3 +29,15 @@ test('resource and cancellation gates prevent dispatch',async t=>{
  const f=await fixture(t);assert.equal((await dispatchRetestCycle({...options(f.journal),checkCapacity:async()=>false})).status,'PAUSED');
  const c=new AbortController();c.abort();assert.equal((await dispatchRetestCycle({...options(f.journal),signal:c.signal})).status,'PAUSED');assert.equal(f.count(),1);
 });
+
+test('interrupted retest dispatch retains the input cursor for safe resumption',async t=>{
+ const f=await fixture(t);let checks=0;
+ const paused=await dispatchRetestCycle({...options(f.journal),checkCapacity:async()=>++checks===1});
+ assert.equal(paused.status,'CYCLE_INCOMPLETE');
+ assert.equal(paused.nextCursor,0);
+ assert.equal(paused.hasMore,true);
+ assert.equal(f.count(),1);
+ const resumed=await dispatchRetestCycle({...options(f.journal),after:paused.nextCursor});
+ assert.equal(resumed.events[0].outcome,'PASSED');
+ assert.equal(f.count(),2);
+});
