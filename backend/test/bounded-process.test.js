@@ -21,3 +21,14 @@ test('output is bounded and relative executable paths rejected',async()=>{
  assert.equal(r.output.length,100);assert.equal(r.outputTruncated,true);
  assert.throws(()=>runBoundedProcess({binary:'node'}));
 });
+
+test('invalid executable and working-directory paths are rejected before spawning',()=>{
+ assert.throws(()=>runBoundedProcess({binary:process.execPath+'\0'}),/Invalid trusted process configuration/);
+ assert.throws(()=>run('console.log("never")',{cwd:'/tmp/invalid\0path'}),/Invalid trusted process configuration/);
+});
+test('missing executable produces factual infrastructure failure',async()=>{
+ const result=await runBoundedProcess({binary:'/nonexistent-testlab-fixture/executable'});
+ assert.equal(result.status,'INFRASTRUCTURE_ERROR');
+ assert.equal(result.exitCode,null);
+ assert.equal(result.terminationConfirmed,false);
+});
