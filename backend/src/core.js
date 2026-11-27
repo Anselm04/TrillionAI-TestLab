@@ -1,4 +1,4 @@
-import { realpath, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { realpath, mkdir, readFile, open, link, unlink } from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -25,6 +25,27 @@ export async function readStoredReport(reportRoot, id) {
   catch { throw new Error('Report integrity check failed'); }
   if (report?.id !== id || !verifyReportChecksum(report)) throw new Error('Report integrity check failed');
   return report;
+}
+
+// Local filesystem publication: write and sync a private staging file, then
+// publish it atomically without replacing an existing report. A crash can
+// leave an ignored staging file but cannot expose a partially written report.
+export async function persistReport(reportRoot, report) {
+  const id=report?.id;
+  if (typeof id!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)||!verifyReportChecksum(report)) throw new Error('Report integrity check failed');
+  const serialized=JSON.stringify(report,null,2);
+  await mkdir(reportRoot,{recursive:true});
+  const staged=join(reportRoot,'.'+id+'.'+randomUUID()+'.tmp');
+  const handle=await open(staged,'wx',0o600);
+  try {
+    try { await handle.writeFile(serialized,'utf8'); await handle.sync(); }
+    finally { await handle.close(); }
+    await link(staged,join(reportRoot,id+'.json'));
+  } finally { await unlink(staged); }
+  // The current production-independent runner targets Linux filesystems.
+  // Sync the namespace change before acknowledging persisted evidence.
+  const directory=await open(reportRoot,'r');
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 
 export function runProcess(binary, args, { timeoutMs = 120000, outputLimit = 128000, binaryOutput = false } = {}) {
@@ -77,7 +98,6 @@ export async function executeRun({ workspaceRoot, reportRoot, project, runner = 
     observations: [observation],
     productionReady: false
   });
-  await mkdir(reportRoot, { recursive: true });
-  await writeFile(join(reportRoot, id + '.json'), JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o600 });
+  await persistReport(reportRoot,report);
   return report;
 }
