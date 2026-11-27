@@ -124,6 +124,45 @@ class RunReportSnapshot {
   }
 }
 
+String comparisonPath(String before, String after) {
+  final a = before.trim(), b = after.trim();
+  reportPath(a);
+  reportPath(b);
+  if (a == b) throw const FormatException('Choose two different report IDs');
+  return '/runs/compare/$a/$b';
+}
+
+class ReportComparison {
+  const ReportComparison(this.project, this.status, this.beforeStatus, this.afterStatus);
+  final String project, status, beforeStatus, afterStatus;
+
+  factory ReportComparison.parse(Object? value, {required String beforeId, required String afterId}) {
+    comparisonPath(beforeId, afterId);
+    if (value is! Map<String, dynamic> || value['schemaVersion'] != 1 ||
+        value['profile'] != 'node-built-in-tests' || value['project'] is! String ||
+        value['productionReady'] != false || value['productCertified'] != false ||
+        value['revisionComparison'] != 'NOT_ESTABLISHED' || value['environmentEquivalenceVerified'] != false ||
+        !['OBSERVATIONS_MATCH', 'OBSERVATIONS_DIFFER', 'CONTEXT_DIFFERS'].contains(value['status'])) {
+      throw const FormatException('Invalid report comparison');
+    }
+    Map<String, dynamic> outcome(Object? item, String id) {
+      if (item is! Map<String, dynamic> || item['id'] != id ||
+          !['PASSED', 'FAILED', 'TIMEOUT', 'INFRASTRUCTURE_ERROR', 'NOT_EXECUTED'].contains(item['status']) ||
+          (item['exitCode'] != null && item['exitCode'] is! int) ||
+          item['integrityDigest'] is! String || !RegExp(r'^[a-f0-9]{64}$').hasMatch(item['integrityDigest'] as String)) {
+        throw const FormatException('Invalid comparison outcome');
+      }
+      return item;
+    }
+    final a = outcome(value['before'], beforeId), b = outcome(value['after'], afterId);
+    final matches = a['status'] == b['status'] && a['exitCode'] == b['exitCode'];
+    if (value['status'] != 'CONTEXT_DIFFERS' && (value['status'] == 'OBSERVATIONS_MATCH') != matches) {
+      throw const FormatException('Inconsistent comparison outcome');
+    }
+    return ReportComparison(value['project'] as String, value['status'] as String, a['status'] as String, b['status'] as String);
+  }
+}
+
 class TestLabHome extends StatefulWidget {
   const TestLabHome({super.key});
   @override
@@ -135,6 +174,8 @@ class _TestLabHomeState extends State<TestLabHome> {
   final token = TextEditingController();
   final project = TextEditingController(text: 'node-sample');
   final reportId = TextEditingController();
+  final beforeId = TextEditingController();
+  final afterId = TextEditingController();
   final client = http.Client();
   bool running = false;
   String result = 'No test runs yet';
@@ -145,6 +186,8 @@ class _TestLabHomeState extends State<TestLabHome> {
   String? farmError;
   CapabilitySnapshot? capabilities;
   String? capabilityError;
+  ReportComparison? comparison;
+  String? comparisonError;
 
   Future<Object?> request(String path, {Map<String, String>? body}) async {
     final uri = apiUri(endpoint.text, path);
@@ -212,6 +255,20 @@ class _TestLabHomeState extends State<TestLabHome> {
     }
   }
 
+  Future<void> compareReports() async {
+    if (running) return;
+    final before = beforeId.text.trim(), after = afterId.text.trim();
+    setState(() { running = true; comparison = null; comparisonError = null; });
+    try {
+      final result = ReportComparison.parse(await request(comparisonPath(before, after)), beforeId: before, afterId: after);
+      if (mounted) setState(() => comparison = result);
+    } catch (_) {
+      if (mounted) setState(() => comparisonError = 'Comparison unavailable or incompatible.');
+    } finally {
+      if (mounted) setState(() => running = false);
+    }
+  }
+
   Future<void> inspectCapabilities() async {
     if (running) return;
     setState(() { running = true; capabilities = null; capabilityError = null; });
@@ -227,7 +284,7 @@ class _TestLabHomeState extends State<TestLabHome> {
 
   @override
   void dispose() {
-    client.close(); endpoint.dispose(); token.dispose(); project.dispose(); reportId.dispose();
+    client.close(); endpoint.dispose(); token.dispose(); project.dispose(); reportId.dispose(); beforeId.dispose(); afterId.dispose();
     super.dispose();
   }
 
@@ -290,6 +347,19 @@ class _TestLabHomeState extends State<TestLabHome> {
           const Text('Checksum metadata is not a signature or product certification.'),
         ],
         SelectableText(result),
+        const Divider(height: 32),
+        Text('Compare saved runs', style: Theme.of(context).textTheme.headlineSmall),
+        TextField(controller: beforeId, enabled: !running, decoration: const InputDecoration(labelText: 'Earlier report ID')),
+        TextField(controller: afterId, enabled: !running, decoration: const InputDecoration(labelText: 'Later report ID')),
+        OutlinedButton.icon(onPressed: running ? null : compareReports, icon: const Icon(Icons.compare_arrows), label: const Text('Compare reports')),
+        if (comparisonError != null) Text(comparisonError!),
+        if (comparison != null) ...[
+          Text('Project: ${comparison!.project}'),
+          Text('Comparison: ${comparison!.status}'),
+          Text('Earlier result: ${comparison!.beforeStatus}'),
+          Text('Later result: ${comparison!.afterStatus}'),
+          const Text('Source revision and environment equivalence are not established. A changed outcome does not prove a repair.'),
+        ],
         const SizedBox(height: 24),
         const Text('Inventory is observational. This dashboard does not certify readiness or deploy applications.'),
       ]),

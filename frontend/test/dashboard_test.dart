@@ -62,4 +62,24 @@ void main() {
     expect(find.text('Phone farm'), findsOneWidget);
     expect(find.text('Refresh inventory'), findsOneWidget);
   });
+  test('saved comparison retains both results and does not certify a repair', () {
+    const before = '00000000-0000-4000-8000-000000000001';
+    const after = '00000000-0000-4000-8000-000000000002';
+    final data = <String, dynamic>{
+      'schemaVersion': 1, 'project': 'fixture', 'profile': 'node-built-in-tests',
+      'status': 'OBSERVATIONS_DIFFER',
+      'before': {'id': before, 'status': 'FAILED', 'exitCode': 1, 'integrityDigest': 'a'.padLeft(64, 'a')},
+      'after': {'id': after, 'status': 'PASSED', 'exitCode': 0, 'integrityDigest': 'b'.padLeft(64, 'b')},
+      'revisionComparison': 'NOT_ESTABLISHED', 'environmentEquivalenceVerified': false,
+      'productCertified': false, 'productionReady': false,
+    };
+    expect(comparisonPath(before, after), '/runs/compare/$before/$after');
+    final comparison = ReportComparison.parse(data, beforeId: before, afterId: after);
+    expect(comparison.beforeStatus, 'FAILED');
+    expect(comparison.afterStatus, 'PASSED');
+    expect(() => comparisonPath(before, before), throwsFormatException);
+    expect(() => ReportComparison.parse(data, beforeId: after, afterId: before), throwsFormatException);
+    expect(() => ReportComparison.parse({...data, 'productCertified': true}, beforeId: before, afterId: after), throwsFormatException);
+    expect(() => ReportComparison.parse({...data, 'status': 'OBSERVATIONS_MATCH'}, beforeId: before, afterId: after), throwsFormatException);
+  });
 }
