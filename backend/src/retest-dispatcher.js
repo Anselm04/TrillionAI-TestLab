@@ -8,11 +8,11 @@ export async function dispatchRetestCycle({projectId,journal,verifyStoredObserva
  if(signal?.aborted||await checkCapacity()!==true||signal?.aborted)return report('PAUSED');
  const analysis=await analyzeJournalFailures({projectId,journal,verifyStoredObservation,after,maxRuns});
  const rejected=new Set(analysis.rejected);
- const recommendations=analysis.recommendations.filter(r=>r.action==='RETEST_REGISTERED_CASE');
+ // Recommendations are a bounded presentation list, not an execution inventory.
  const candidates=new Map();
- for(const r of recommendations){
-  const matching=analysis.groups.filter(g=>g.status==='FAILED'&&g.testId===r.testId&&g.environmentId===r.environmentId&&g.definitionSha256===r.definitionSha256&&g.revisionSha256===r.revisionSha256);
-  for(const g of matching)for(const runId of g.evidenceIds)if(!rejected.has(runId))candidates.set(runId,r);
+ for(const g of analysis.groups){
+  if(g.status!=='FAILED')continue;
+  for(const runId of g.evidenceIds)if(!rejected.has(runId))candidates.set(runId,g);
  }
  let attempted=0,interrupted=false;
  for(const [parentRunId,r] of candidates){
