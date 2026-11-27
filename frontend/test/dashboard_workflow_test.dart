@@ -38,6 +38,57 @@ Future<void> fill(WidgetTester tester, String label, String value) async {
 }
 
 void main() {
+  testWidgets('device inventory filters platforms and clears stale data after an unavailable refresh', (tester) async {
+    var attempts = 0;
+    final client = MockClient((request) async {
+      expect(request.method, 'GET');
+      expect(request.url.path, '/device-farm');
+      attempts++;
+      if (attempts == 2) return http.Response('{}', 503);
+      return http.Response(jsonEncode({
+        'status': 'RACK_SNAPSHOT', 'productionReady': false,
+        'devices': [
+          {'id': 'android-fixture', 'platform': 'android', 'available': true, 'state': 'IDLE'},
+          {'id': 'ios-fixture', 'platform': 'ios', 'available': false, 'state': 'QUARANTINED'},
+        ],
+      }), 200);
+    });
+    addTearDown(client.close);
+    await tester.pumpWidget(MaterialApp(home: TestLabHome(httpClient: client)));
+    final refresh = find.text('Refresh inventory');
+    await tester.tap(refresh);
+    await tester.pumpAndSettle();
+    expect(find.text('Available: 1'), findsOneWidget);
+    expect(find.text('Quarantined: 1'), findsOneWidget);
+    final filter = find.byType(DropdownButton<String>);
+    await showControl(tester, filter);
+    await tester.tap(filter);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Android').last);
+    await tester.pumpAndSettle();
+    expect(find.text('android-fixture'), findsOneWidget);
+    expect(find.text('ios-fixture'), findsNothing);
+    await tester.tap(filter);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('iOS').last);
+    await tester.pumpAndSettle();
+    expect(find.text('ios-fixture'), findsOneWidget);
+    expect(find.text('android-fixture'), findsNothing);
+    await tester.scrollUntilVisible(refresh, -180, scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+    await tester.tap(refresh);
+    await tester.pumpAndSettle();
+    expect(find.text('Inventory unavailable or unauthorized.'), findsOneWidget);
+    expect(find.text('Available: 1'), findsNothing);
+    expect(find.text('ios-fixture'), findsNothing);
+    await tester.tap(refresh);
+    await tester.pumpAndSettle();
+    expect(attempts, 3);
+    expect(find.text('Inventory unavailable or unauthorized.'), findsNothing);
+    expect(find.text('Available: 1'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   for (final size in [const Size(390, 844), const Size(1280, 800)]) {
     testWidgets('saved report review and comparison at ${size.width}x${size.height}', (tester) async {
       tester.view.devicePixelRatio = 1;

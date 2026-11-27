@@ -4,4 +4,4 @@ Configure TESTLAB_DEVICE_ALLOWLIST with dedicated Android serials and TESTLAB_DE
 
 Use loadServiceKey for operator-provisioned Ed25519 key files on separate worker and reviewer service accounts. Private files must be owned by the service account and inaccessible to group and other users. Parent directories must be trusted. Never commit keys or accept paths from jobs. Key rotation, service transport and multi-host orchestration remain outstanding. No paid services are required.
 
-The dashboard is read-only; video, Appium, iOS, autonomous generation and physical qualification remain outstanding. Existing CI tests the backend, not a Flutter build.
+The dashboard is read-only. CI includes Flutter analysis and mocked-HTTP widget fixtures, including Android/iOS inventory filtering, availability/quarantine counts, and clearing stale inventory after an unavailable refresh. These checks do not establish native platform builds, physical device execution or production readiness.
